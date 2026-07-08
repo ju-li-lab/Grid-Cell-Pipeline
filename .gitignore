@@ -1,0 +1,20 @@
+# macOS
+.DS_Store
+
+# Data & outputs — keep these OUT of Git
+*.nii
+*.nii.gz
+*.dcm
+/data/
+/derivatives/
+/outputs/
+*.log
+
+# MATLAB
+*.asv
+slprj/
+
+# R
+.Rhistory
+.RData
+.Rproj.user/
