@@ -1,9 +1,3 @@
-#GridCell 
-
-this file should synchronize with my personal Obsidian Vault
--> formatting might look weird. If File is suddenly gone, contact Juli.
--> for better readability consider changing to web layout in Word
--> Always use from this source for up-to-date documentation
 
 Version ==13.03.2026== edited 27.04.2026
 
