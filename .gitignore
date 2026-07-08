@@ -18,3 +18,7 @@ slprj/
 .Rhistory
 .RData
 .Rproj.user/
+
+# Claude and other
+.claude
+*claude*
