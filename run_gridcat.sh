@@ -94,6 +94,12 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         DEP_FLAG=(--dependency="${GRIDCAT_DEPENDENCY}")
     fi
 
+    # Email once when the GridCAT analysis finishes (or fails).
+    MAIL_FLAG=()
+    if [[ -n "${NOTIFY_EMAIL:-}" ]]; then
+        MAIL_FLAG=(--mail-user="${NOTIFY_EMAIL}" --mail-type=END,FAIL)
+    fi
+
     exec sbatch \
         --export=ALL,PIPELINE_SCRIPT_DIR="${SNAP_DIR}",GRIDCAT_ORIG_SCRIPT_DIR="${ORIG_SCRIPT_DIR}" \
         --partition="${SLURM_PARTITION}" \
@@ -101,6 +107,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         --cpus-per-task="${GRIDCAT_CPUS}" \
         --mem="${GRIDCAT_MEM}" \
         "${DEP_FLAG[@]}" \
+        "${MAIL_FLAG[@]}" \
         "${GRES_FLAG[@]}" \
         "${ORIG_SCRIPT_DIR}/run_gridcat.sh"
 fi

@@ -348,6 +348,14 @@ run_step_2() {
 
     local -a dep_flag=()
     [[ -n "${NEXT_DEPENDENCY}" ]] && dep_flag=(--dependency="${NEXT_DEPENDENCY}")
+
+    # Email once when the WHOLE array finishes. Omitting ARRAY_TASKS from
+    # --mail-type makes SLURM treat the array as a single unit, so END/FAIL
+    # generate one message for all subjects rather than one per task.
+    local -a mail_flag=()
+    if [[ -n "${NOTIFY_EMAIL:-}" ]]; then
+        mail_flag=(--mail-user="${NOTIFY_EMAIL}" --mail-type=END,FAIL)
+    fi
     LAST_JOB_ID=""
 
     local sbatch_output
@@ -359,6 +367,7 @@ run_step_2() {
         --mem-per-cpu="${PREPROC_MEM_PER_CPU}" \
         --array=1-"${num_subjects}" \
         "${dep_flag[@]}" \
+        "${mail_flag[@]}" \
         "${SCRIPT_DIR}/spm_preproc_array.sbatch" 2>&1); then
         print_success "Preprocessing jobs submitted!"
 
