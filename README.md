@@ -3,12 +3,7 @@
 
 Version ==13.03.2026== edited 27.04.2026
 
-This is still a work in progress. Script paths will be provided.
-For now you can make a copy of the folder into your own directory
-
-```
-/sc-projects/sc-proj-cc02-brainspace/sirius_wip/v2_fR/scripts_v2
-```
+This is still a work in progress.
 
 ! Usage of "session", "task", and "run" can differ between documentations. For example the "sessions" in GridCat don't match what is meant by "session" in bids but instead refers to "tasks"
 
