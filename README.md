@@ -1,3 +1,5 @@
++++ 09.07.2026 - UPDATE: Moved Pipeline to GitHub repository. To run the pipeline, clone using http link and run as usual. +++
+
 
 Version ==13.03.2026== edited 27.04.2026
 
