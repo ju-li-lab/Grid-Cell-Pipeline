@@ -127,6 +127,29 @@ if strcmp(CFG.PREPROC_MODE, 'topup')
     end
 end
 
+% Precalculated fieldmap parameters (only used when PREPROC_MODE=precalc_fieldmap)
+% The fieldmap and its magnitude are what make_fieldmaps.sh writes into fmap/.
+% The extension is appended by the search, so strip it if the pattern was
+% written with one (the ROI patterns in the same config do include it).
+stripExt = @(x) regexprep(x, '\.nii(\.gz)?$', '');
+if isfield(cfgRaw, 'FIELDMAP_PATTERN') && ~isempty(cfgRaw.FIELDMAP_PATTERN)
+    CFG.FIELDMAP_PATTERN = stripExt(cfgRaw.FIELDMAP_PATTERN);
+else
+    CFG.FIELDMAP_PATTERN = '_fieldmap';
+end
+if isfield(cfgRaw, 'FIELDMAP_MAGNITUDE_PATTERN') && ~isempty(cfgRaw.FIELDMAP_MAGNITUDE_PATTERN)
+    CFG.FIELDMAP_MAGNITUDE_PATTERN = stripExt(cfgRaw.FIELDMAP_MAGNITUDE_PATTERN);
+else
+    CFG.FIELDMAP_MAGNITUDE_PATTERN = '_magnitude';
+end
+% Units of the fieldmap on disk. fsl_prepare_fieldmap writes rad/s; SPM's
+% FieldMap toolbox expects Hz, so rad/s is divided by 2*pi before use.
+if isfield(cfgRaw, 'FIELDMAP_UNITS') && ~isempty(cfgRaw.FIELDMAP_UNITS)
+    CFG.FIELDMAP_UNITS = lower(strtrim(cfgRaw.FIELDMAP_UNITS));
+else
+    CFG.FIELDMAP_UNITS = 'rad/s';
+end
+
 % Session mean settings
 CFG.DO_SESSION_MEAN = 1;
 CFG.SESSION_MEAN_NAME = 'meanu_session.nii';
@@ -207,8 +230,13 @@ STAGES = resolve_stages(stages);
 % --------- Safety / init ----------
 assert(isfolder(BIDS_ROOT), 'BIDS_ROOT not found: %s', BIDS_ROOT);
 assert(startsWith(SUB,'sub-') && startsWith(SES,'ses-'), 'SUB/SES must look like sub-01s06 / ses-01');
-assert(ismember(CFG.PREPROC_MODE, {'realign_unwarp','topup','realign_only'}), ...
-    'Unknown PREPROC_MODE: %s (must be realign_unwarp, topup or realign_only)', CFG.PREPROC_MODE);
+assert(ismember(CFG.PREPROC_MODE, {'realign_unwarp','topup','realign_only','precalc_fieldmap'}), ...
+    'Unknown PREPROC_MODE: %s (must be realign_unwarp, topup, precalc_fieldmap or realign_only)', ...
+    CFG.PREPROC_MODE);
+if strcmp(CFG.PREPROC_MODE, 'precalc_fieldmap')
+    assert(ismember(CFG.FIELDMAP_UNITS, {'rad/s','rads','rad_per_s','hz'}), ...
+        'Unknown FIELDMAP_UNITS: %s (must be rad/s or Hz)', CFG.FIELDMAP_UNITS);
+end
 if strcmp(CFG.PREPROC_MODE, 'topup')
     assert(ismember(CFG.TOPUP_APPLY_METHOD, {'applytopup','vdm'}), ...
         'Unknown TOPUP_APPLY_METHOD: %s (must be applytopup or vdm)', CFG.TOPUP_APPLY_METHOD);
@@ -233,7 +261,7 @@ if ~isempty(STAGES.skipped)
 end
 
 % --------- Which directories a run actually needs depends on the stages ------
-if STAGES.vdm && strcmp(CFG.PREPROC_MODE, 'realign_unwarp')
+if STAGES.vdm && ismember(CFG.PREPROC_MODE, {'realign_unwarp','precalc_fieldmap'})
     assert(isfolder(fmapDir), 'Missing fmap dir: %s', fmapDir);
 elseif STAGES.topup && strcmp(CFG.PREPROC_MODE, 'topup') && strcmp(CFG.TOPUP_REVERSE_PE_DIR, 'fmap')
     assert(isfolder(fmapDir), 'Missing fmap dir: %s (TOPUP_REVERSE_PE_DIR=fmap)', fmapDir);
@@ -249,6 +277,8 @@ runSel = load_run_selection(CFG.RUN_SELECTION_FILE, SUB, SES);
 phasemap = '';
 magnitude1 = '';
 reversePE_epi = '';
+fieldmapFile = '';
+fieldmapMag = '';
 
 if strcmp(CFG.PREPROC_MODE, 'realign_unwarp') && STAGES.vdm
     % GRE fieldmap mode: need phasediff + magnitude1
@@ -269,6 +299,16 @@ if strcmp(CFG.PREPROC_MODE, 'realign_unwarp') && STAGES.vdm
 
     fprintf('Fieldmap phasediff:  %s\n', phasemap);
     fprintf('Fieldmap magnitude1: %s\n', magnitude1);
+
+elseif strcmp(CFG.PREPROC_MODE, 'precalc_fieldmap') && STAGES.vdm
+    % Precalculated fieldmap mode: a ready-made B0 map plus the magnitude image
+    % it was unwrapped against — what make_fieldmaps.sh writes into fmap/.
+    [fieldmapFile, fieldmapMag] = find_precalc_fieldmap(fmapDir, SUB, SES, CFG, runSel);
+    fieldmapFile = ensure_nii(fieldmapFile);   % decompress .nii.gz for SPM
+    fieldmapMag  = ensure_nii(fieldmapMag);
+    fprintf('Fieldmap:           %s\n', fieldmapFile);
+    fprintf('Fieldmap magnitude: %s\n', fieldmapMag);
+    fprintf('Fieldmap units:     %s\n', CFG.FIELDMAP_UNITS);
 
 elseif strcmp(CFG.PREPROC_MODE, 'topup') && STAGES.topup
     % Topup mode: find the reverse-PE EPI.
@@ -330,7 +370,7 @@ for ii = 1:nTasks
 end
 
 % Does this configuration need voxel displacement maps at all?
-needVDM = strcmp(CFG.PREPROC_MODE, 'realign_unwarp') || ...
+needVDM = ismember(CFG.PREPROC_MODE, {'realign_unwarp','precalc_fieldmap'}) || ...
           (strcmp(CFG.PREPROC_MODE, 'topup') && strcmp(CFG.TOPUP_APPLY_METHOD, 'vdm'));
 
 % =====================================================================
@@ -365,17 +405,34 @@ if STAGES.vdm
         fprintf('\n=== STAGE vdm: nothing to build in mode %s ===\n', CFG.PREPROC_MODE);
     else
         fprintf('\n=== STAGE vdm: building voxel displacement maps ===\n');
+
+        % SPM's FieldMap toolbox works in Hz. fsl_prepare_fieldmap writes rad/s,
+        % so convert once per session before looping over the tasks.
+        fieldmapHz = '';
+        if strcmp(CFG.PREPROC_MODE, 'precalc_fieldmap')
+            fieldmapHz = fieldmap_to_hz(fieldmapFile, funcDir, CFG);
+        end
+
         for ii = 1:nTasks
             tLabel = CFG.TASK_LABELS{ii};
             epiRef = taskVols{ii}{1};   % first volume as VDM reference
-            if strcmp(CFG.PREPROC_MODE, 'realign_unwarp')
-                fprintf('Calculating VDM for task-%s...\n', tLabel);
-                taskVDM{ii} = calc_vdm_for_run_to_func(phasemap, magnitude1, epiRef, funcDir, fmapDir, CFG, ii);
-            else
-                fprintf('Converting topup field to VDM for task-%s...\n', tLabel);
-                taskVDM{ii} = convert_topup_to_vdm(topupPrefix, epiRef, funcDir, CFG, ii);
+            switch CFG.PREPROC_MODE
+                case 'realign_unwarp'
+                    fprintf('Calculating VDM for task-%s...\n', tLabel);
+                    taskVDM{ii} = calc_vdm_for_run_to_func(phasemap, magnitude1, epiRef, funcDir, fmapDir, CFG, ii);
+                case 'precalc_fieldmap'
+                    fprintf('Calculating VDM from precalculated fieldmap for task-%s...\n', tLabel);
+                    taskVDM{ii} = calc_vdm_from_fieldmap(fieldmapHz, fieldmapMag, epiRef, funcDir, fmapDir, CFG, ii);
+                otherwise
+                    fprintf('Converting topup field to VDM for task-%s...\n', tLabel);
+                    taskVDM{ii} = convert_topup_to_vdm(topupPrefix, epiRef, funcDir, CFG, ii);
             end
             fprintf('VDM (task-%s): %s\n', tLabel, taskVDM{ii});
+        end
+
+        % Drop the Hz intermediate; the VDMs are what the realign stage reads
+        if ~isempty(fieldmapHz) && isfile(fieldmapHz)
+            delete(fieldmapHz);
         end
     end
 end
@@ -715,9 +772,8 @@ function vdm_out = calc_vdm_for_run_to_func(phasemap, magnitude1, epiRef, funcDi
 % - Instead: snapshot existing vdm* files (func+fmap), run job, then diff to find newly created VDM.
 
 % ---- Snapshot existing VDM candidates (before) ----
-before = list_vdm_candidates(funcDir);
-before = [before; list_vdm_candidates(fmapDir)];
-before = unique(before);
+vdmSearchDirs = {funcDir, fmapDir, pwd};
+before = list_vdm_candidates(vdmSearchDirs);
 
 % ---- Build FieldMap batch ----
 matlabbatch = {};
@@ -767,16 +823,8 @@ cd(funcDir);
 spm_jobman('run', matlabbatch);
 
 % ---- Snapshot after, diff to find NEW VDM(s) ----
-after = list_vdm_candidates(funcDir);
-after = [after; list_vdm_candidates(fmapDir)];
-after = unique(after);
-
-newFiles = setdiff(after, before);
-
-% If nothing appears in func/fmap, also check current dir (rare but happens)
-if isempty(newFiles)
-    newFiles = setdiff(list_vdm_candidates(pwd), before);
-end
+after = list_vdm_candidates([vdmSearchDirs, {pwd}]);
+newFiles = diff_vdm_candidates(before, after);
 
 assert(~isempty(newFiles), 'VDM not found after FieldMap run for task-%d. Check where FieldMap writes outputs.', taskN);
 
@@ -810,18 +858,50 @@ fprintf('Renamed VDM -> %s\n', vdm_out);
 end
 
 % ---------------- helper: list VDM candidates ----------------
-function files = list_vdm_candidates(folder)
-files = {};
-if ~isfolder(folder), return; end
-d = dir(folder);
+function files = list_vdm_candidates(folders)
+% LIST_VDM_CANDIDATES  Snapshot the vdm* files across one or more folders.
+%
+% Returns a struct array with .path, .datenum and .bytes. Recording the
+% timestamp and size (not just the path) means a VDM that SPM overwrote in
+% place still registers as new output — which happens when a stale vdm5_* from
+% an earlier manual run is already sitting in fmap/.
 
-for i = 1:numel(d)
-    if d(i).isdir, continue; end
-    n = d(i).name;
+if ischar(folders), folders = {folders}; end
+files = struct('path', {}, 'datenum', {}, 'bytes', {});
+seen = {};
 
-    % FieldMap typically uses vdm*.nii or vdm*.img/.hdr
-    if ~isempty(regexp(n,'^vdm.*\.(nii|img)$','once'))
-        files{end+1,1} = fullfile(folder,n); %#ok<AGROW>
+for f = 1:numel(folders)
+    folder = folders{f};
+    if isempty(folder) || ~isfolder(folder), continue; end
+    d = dir(folder);
+    for i = 1:numel(d)
+        if d(i).isdir, continue; end
+        n = d(i).name;
+
+        % FieldMap typically uses vdm*.nii or vdm*.img/.hdr
+        if isempty(regexp(n,'^vdm.*\.(nii|img)$','once')), continue; end
+
+        p = fullfile(folder, n);
+        if ismember(p, seen), continue; end
+        seen{end+1} = p; %#ok<AGROW>
+        files(end+1) = struct('path', p, 'datenum', d(i).datenum, 'bytes', d(i).bytes); %#ok<AGROW>
+    end
+end
+end
+
+% ---------------- helper: VDM files that appeared or changed ----------------
+function newFiles = diff_vdm_candidates(before, after)
+% DIFF_VDM_CANDIDATES  Paths in `after` that are new, or were rewritten.
+
+newFiles = {};
+beforePaths = {before.path};
+
+for i = 1:numel(after)
+    idx = find(strcmp(after(i).path, beforePaths), 1);
+    if isempty(idx)
+        newFiles{end+1,1} = after(i).path; %#ok<AGROW>
+    elseif after(i).datenum > before(idx).datenum || after(i).bytes ~= before(idx).bytes
+        newFiles{end+1,1} = after(i).path; %#ok<AGROW>
     end
 end
 end
@@ -1009,6 +1089,201 @@ matlabbatch{1}.spm.spatial.smooth.prefix = CFG.SMOOTH_PREFIX;
 
 spm_jobman('run', matlabbatch);
 fprintf('  Smoothing complete. Output prefix: %s\n', CFG.SMOOTH_PREFIX);
+end
+
+% ================= PRECALCULATED FIELDMAP HELPERS =================
+
+function [fieldmapFile, magFile] = find_precalc_fieldmap(fmapDir, SUB, SES, CFG, runSel)
+% FIND_PRECALC_FIELDMAP  Locate a ready-made B0 fieldmap and its magnitude.
+%
+% Looks for the BIDS "Case 3" pair that make_fieldmaps.sh writes:
+%   fmap/<sub>_<ses>[_run-N]_fieldmap.nii[.gz]
+%   fmap/<sub>_<ses>[_run-N]_magnitude.nii[.gz]
+%
+% When several runs exist, run_selection.tsv decides (key: fieldmap); otherwise
+% the last one in sorted order is used, matching how find_t2w picks a T2w.
+
+fmPat  = regexptranslate('escape', CFG.FIELDMAP_PATTERN);
+magPat = regexptranslate('escape', CFG.FIELDMAP_MAGNITUDE_PATTERN);
+stem   = ['^' regexptranslate('escape',SUB) '_' regexptranslate('escape',SES)];
+
+candidates = all_matches(fmapDir, [stem '.*' fmPat '\.nii(\.gz)?$']);
+assert(~isempty(candidates), [ ...
+    'No fieldmap found in %s\n' ...
+    'Expected a file like %s_%s%s.nii[.gz]\n' ...
+    'Create one with:  bash make_fieldmaps.sh --sub %s --ses %s\n' ...
+    '(or point FIELDMAP_PATTERN at whatever your fieldmaps are called)'], ...
+    fmapDir, SUB, SES, CFG.FIELDMAP_PATTERN, SUB, SES);
+
+candidates = sort(candidates);
+if numel(candidates) == 1
+    fieldmapFile = candidates{1};
+else
+    fieldmapFile = '';
+    if isfield(runSel, 'fieldmap') && ~isempty(runSel.fieldmap)
+        for i = 1:numel(candidates)
+            [~, fname] = fileparts(candidates{i});
+            if contains(fname, runSel.fieldmap)
+                fieldmapFile = candidates{i};
+                fprintf('  Fieldmap: using selected %s (from run_selection.tsv)\n', runSel.fieldmap);
+                break;
+            end
+        end
+    end
+    if isempty(fieldmapFile)
+        fieldmapFile = candidates{end};
+        fprintf('  Fieldmap: multiple runs found (%d), using last: %s\n', ...
+                numel(candidates), fieldmapFile);
+    end
+end
+
+% The magnitude should carry the same BIDS entities as the fieldmap
+[~, fmName] = fileparts(regexprep(fieldmapFile, '\.gz$', ''));
+fmStem = regexprep(fmName, [fmPat '$'], '');
+
+magCandidates = all_matches(fmapDir, ...
+    ['^' regexptranslate('escape', fmStem) magPat '\.nii(\.gz)?$']);
+if isempty(magCandidates)
+    % Fall back to any magnitude for this session
+    magCandidates = all_matches(fmapDir, [stem '.*' magPat '\.nii(\.gz)?$']);
+end
+
+assert(~isempty(magCandidates), [ ...
+    'Found the fieldmap but not its magnitude image in %s\n' ...
+    '  Fieldmap: %s\n' ...
+    '  Expected: %s%s.nii[.gz]\n' ...
+    'SPM needs a magnitude in the same space as the fieldmap to mask and to\n' ...
+    'match the VDM to the EPI. make_fieldmaps.sh writes one next to each\n' ...
+    'fieldmap it creates.'], ...
+    fmapDir, fieldmapFile, fmStem, CFG.FIELDMAP_MAGNITUDE_PATTERN);
+
+magCandidates = sort(magCandidates);
+magFile = magCandidates{end};
+end
+
+function hzFile = fieldmap_to_hz(fieldmapFile, funcDir, CFG)
+% FIELDMAP_TO_HZ  Write a copy of the fieldmap in Hz for SPM's FieldMap toolbox.
+%
+% fsl_prepare_fieldmap writes rad/s; SPM's "Precalculated FieldMap" input is
+% documented as Hz, so rad/s is divided by 2*pi. A fieldmap already in Hz is
+% copied through unchanged, so the rest of the code has one path to follow.
+%
+% Doing the unit conversion here — and letting SPM do the Hz -> voxel-shift
+% conversion with its own internal scaling (from TOTAL_READOUT_MS and
+% BLIP_DIRECTION) — keeps this code out of the business of guessing what
+% scaling SPM's VDM files use.
+
+V = spm_vol(fieldmapFile);
+if numel(V) > 1, V = V(1); end
+dat = spm_read_vols(V);
+
+switch CFG.FIELDMAP_UNITS
+    case {'rad/s','rads','rad_per_s'}
+        dat = dat / (2*pi);
+        fprintf('  Converted fieldmap rad/s -> Hz (divided by 2*pi).\n');
+    case 'hz'
+        fprintf('  Fieldmap is already in Hz; no conversion.\n');
+    otherwise
+        error('Unknown FIELDMAP_UNITS: %s (must be rad/s or Hz)', CFG.FIELDMAP_UNITS);
+end
+
+fprintf('  Fieldmap range: %.1f to %.1f Hz\n', min(dat(:)), max(dat(:)));
+
+hzFile = fullfile(funcDir, 'fieldmap_hz.nii');
+Vout = V;
+Vout.fname = hzFile;
+Vout.dt = [spm_type('float32') 0];
+Vout.pinfo = [1;0;0];
+Vout.descrip = 'B0 fieldmap in Hz (for SPM FieldMap)';
+spm_write_vol(Vout, dat);
+end
+
+function vdm_out = calc_vdm_from_fieldmap(fieldmapHz, magFile, epiRef, funcDir, fmapDir, CFG, taskN)
+% CALC_VDM_FROM_FIELDMAP  Build a VDM from a precalculated fieldmap (in Hz).
+%
+% Uses SPM's FieldMap toolbox "Precalculated FieldMap" input, so SPM performs
+% the fieldmap -> voxel displacement conversion itself from TOTAL_READOUT_MS
+% (tert) and BLIP_DIRECTION, and matches the VDM to this run's EPI geometry.
+%
+% Same output contract as calc_vdm_for_run_to_func: the VDM ends up in funcDir
+% as vdm_task-<N>.nii, found by diffing the vdm* files before and after the run.
+
+% ---- Snapshot existing VDM candidates (before) ----
+vdmSearchDirs = {funcDir, fmapDir, pwd};
+before = list_vdm_candidates(vdmSearchDirs);
+
+% ---- Build FieldMap batch ----
+matlabbatch = {};
+
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.data.precalcfieldmap.precalcfieldmap = {fieldmapHz};
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.data.precalcfieldmap.magfieldmap     = {magFile};
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.session.epi = {epiRef};
+
+% Echo times are unused for a precalculated fieldmap (no phase to unwrap), but
+% the batch still requires the defaults structure to be complete.
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.et        = [CFG.TE_SHORT CFG.TE_LONG];
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.maskbrain = CFG.MASKBRAIN;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.blipdir   = CFG.BLIPDIR;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.tert      = CFG.TOTAL_READOUT;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.epifm     = CFG.EPI_BASED_FIELDMAP;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.ajm       = 0;
+
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.uflags.method = CFG.VDM_UFLAGS_METHOD;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.uflags.fwhm   = CFG.VDM_UFLAGS_FWHM;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.uflags.pad    = CFG.VDM_UFLAGS_PAD;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.uflags.ws     = CFG.VDM_UFLAGS_WS;
+
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.template = {fullfile(spm('Dir'),'toolbox','FieldMap','T1.nii')};
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.fwhm = 5;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.nerode = 2;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.ndilate = 4;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.thresh = 0.5;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.reg = 0.02;
+
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.matchvdm      = 1;  % write VDM matched to epiRef
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.sessname      = sprintf('task-%d', taskN);
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.writeunwarped = 0;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.anat          = {''};
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.matchanat     = 0;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.vdmflags      = CFG.VDMFLAGS_BASE;
+
+% ---- Run job (from funcDir, so outputs are more likely to land there) ----
+oldpwd = pwd;
+cleanup = onCleanup(@() cd(oldpwd)); %#ok<NASGU>
+cd(funcDir);
+
+spm_jobman('run', matlabbatch);
+
+% ---- Snapshot after, diff to find NEW (or rewritten) VDM(s) ----
+after = list_vdm_candidates([vdmSearchDirs, {pwd}]);
+newFiles = diff_vdm_candidates(before, after);
+
+assert(~isempty(newFiles), [ ...
+    'VDM not found after FieldMap run for task-%d.\n' ...
+    'Check where SPM FieldMap wrote its output (looked in %s, %s).'], ...
+    taskN, funcDir, fmapDir);
+
+newest = pick_newest_file(newFiles);
+
+% ---- Move/rename deterministically into funcDir ----
+vdm_out = fullfile(funcDir, sprintf('vdm_task-%d.nii', taskN));
+
+[~,~,ext] = fileparts(newest);
+if strcmpi(ext,'.img')
+    target_img = fullfile(funcDir, sprintf('vdm_task-%d.img', taskN));
+    target_hdr = fullfile(funcDir, sprintf('vdm_task-%d.hdr', taskN));
+    if isfile(target_img), delete(target_img); end
+    if isfile(target_hdr), delete(target_hdr); end
+    movefile(newest, target_img);
+    hdr = strrep(newest,'.img','.hdr');
+    if isfile(hdr), movefile(hdr, target_hdr); end
+    vdm_out = target_img;
+else
+    if isfile(vdm_out), delete(vdm_out); end
+    movefile(newest, vdm_out);
+end
+
+fprintf('Renamed VDM -> %s\n', vdm_out);
 end
 
 % ===================== FSL TOPUP HELPER FUNCTIONS =====================
@@ -1678,6 +1953,50 @@ if strcmp(CFG.PREPROC_MODE, 'realign_unwarp') && isfolder(fmapDir)
     end
 end
 
+% --- Validate the precalculated fieldmap sidecar ---
+if strcmp(CFG.PREPROC_MODE, 'precalc_fieldmap') && isfolder(fmapDir)
+    fmPat = regexptranslate('escape', CFG.FIELDMAP_PATTERN);
+    fmJson = first_match(fmapDir, ['^' regexptranslate('escape',SUB) '_' ...
+                                   regexptranslate('escape',SES) '.*' fmPat '\.json$']);
+    if isempty(fmJson)
+        fprintf('  No fieldmap JSON found in fmap/ — cannot cross-check units.\n');
+        fprintf('  Using FIELDMAP_UNITS from config: %s\n', CFG.FIELDMAP_UNITS);
+    else
+        fj = read_json(fmJson);
+        fprintf('  Fieldmap JSON: %s\n', fmJson);
+        if isfield(fj, 'Units') && ~isempty(fj.Units)
+            jsonUnits = lower(strtrim(fj.Units));
+            cfgUnits  = CFG.FIELDMAP_UNITS;
+            % 'rad/s' and 'rads' mean the same thing here
+            normalise = @(u) regexprep(lower(u), '^(rad/s|rads|rad_per_s)$', 'rad/s');
+            if ~strcmp(normalise(jsonUnits), normalise(cfgUnits))
+                fprintf(['  WARNING: fieldmap units mismatch — config FIELDMAP_UNITS: %s, ' ...
+                         'JSON Units: %s\n'], cfgUnits, jsonUnits);
+                fprintf('           A wrong unit scales the whole distortion correction by 2*pi.\n');
+                nWarnings = nWarnings + 1;
+            else
+                fprintf('  Fieldmap units: %s (matches config)\n', jsonUnits);
+            end
+        else
+            fprintf('  Fieldmap JSON has no "Units" field — using config: %s\n', CFG.FIELDMAP_UNITS);
+        end
+        if isfield(fj, 'GeneratedBy') && isstruct(fj.GeneratedBy) && ...
+           isfield(fj.GeneratedBy, 'MagnitudeSource')
+            fprintf('  Magnitude source: %s\n', fj.GeneratedBy.MagnitudeSource);
+        end
+    end
+
+    % A GRE-derived fieldmap is not EPI-based; getting this backwards inverts
+    % how SPM matches the VDM to the EPI.
+    if CFG.EPI_BASED_FIELDMAP ~= 0
+        fprintf(['  WARNING: EPI_BASED_FIELDMAP=%d with PREPROC_MODE=precalc_fieldmap.\n' ...
+                 '           A fieldmap made from a GRE phasediff (make_fieldmaps.sh)\n' ...
+                 '           is NOT EPI-based — set EPI_BASED_FIELDMAP=0.\n'], ...
+                CFG.EPI_BASED_FIELDMAP);
+        nWarnings = nWarnings + 1;
+    end
+end
+
 % --- Summary ---
 if nWarnings == 0
     fprintf('  All BIDS JSON checks passed.\n');
@@ -1783,6 +2102,13 @@ prov.acquisition.te_short_ms = CFG.TE_SHORT;
 prov.acquisition.te_long_ms = CFG.TE_LONG;
 prov.acquisition.blip_direction = CFG.BLIPDIR;
 prov.acquisition.epi_based_fieldmap = CFG.EPI_BASED_FIELDMAP;
+
+% --- Precalculated fieldmap parameters (if applicable) ---
+if strcmp(CFG.PREPROC_MODE, 'precalc_fieldmap')
+    prov.fieldmap.units = CFG.FIELDMAP_UNITS;
+    prov.fieldmap.pattern = CFG.FIELDMAP_PATTERN;
+    prov.fieldmap.magnitude_pattern = CFG.FIELDMAP_MAGNITUDE_PATTERN;
+end
 
 % --- Topup parameters (if applicable) ---
 if strcmp(CFG.PREPROC_MODE, 'topup')

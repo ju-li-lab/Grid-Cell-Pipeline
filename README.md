@@ -46,6 +46,7 @@ All scripts auto-detect their directory and read configuration automatically.
 | `validate_config.sh`          | Shell  | Validates all config settings before running analysis                          |
 | `spm_preproc_array.sbatch`    | SLURM  | HPC array job script for SPM preprocessing (one per subject-session)           |
 | `submit_preproc.sh`           | Shell  | Submits preprocessing, or single stages of it, without the interactive menu    |
+| `make_fieldmaps.sh`           | Shell  | Builds B0 fieldmaps from T1w + phasediff with FSL, for sessions with no magnitude image |
 | `run_spm_preproc.m`           | MATLAB | Performs VDM calc, realign/unwarp (or realign-only), coregistration, reslicing; runs as five separately callable stages |
 | `read_pipeline_config.m`      | MATLAB | Config parser; reads and validates settings in MATLAB                          |
 | `run_prep.sh`                 | Shell  | Wrapper for data preparation for GridCAT                                       |
@@ -157,7 +158,7 @@ The config file contains 7 main sections:
 
 - **BIDS_ROOT** — Absolute path to BIDS dataset root
 - **OUTPUT_ROOT** — Where to write derived data
-- **PREPROC_MODE** — Choose `realign_unwarp`, `topup`, or `realign_only`
+- **PREPROC_MODE** — Choose `realign_unwarp`, `topup`, `precalc_fieldmap`, or `realign_only`
 - **PREPROC_STAGES** — Which parts of the preprocessing to run: `all` (default), or a comma-separated subset of `topup,vdm,realign,coreg,smooth`. See [Running preprocessing in stages](#running-preprocessing-in-stages)
 - **TASKS** — Comma-separated task numbers to process (e.g., `1,2,3` matches task-1, task-2, task-3)
 - **ROI_MODE** — Which ROI masks to use (`both`, `bilat_only`, or `lr_only`)
@@ -362,7 +363,31 @@ Each job processes one subject-session pair. The exact steps depend on `PREPROC_
 **Output in func/:** `u<BOLD>.nii`, `meanu<BOLD>.nii`, `meanu_session.nii`, `rp_<BOLD>.txt`, `vdm_task-*.nii`, `topup_results_*`
 **Output in anat/:** `r<ROI>.nii`
 
-#### Mode D: `realign_only`
+#### Mode D: `precalc_fieldmap` (fieldmap built from the T1w)
+
+For sessions that have a phase-difference image but **no magnitude image**, so
+`fsl_prepare_fieldmap` has nothing to unwrap against. See
+[Building fieldmaps from a structural](#building-fieldmaps-from-a-structural) for
+how the fieldmap is produced.
+
+1. Decompress all `.nii.gz` to `.nii`
+2. Read `fmap/<sub>_<ses>[_run-N]_fieldmap.nii` (rad/s) and its `_magnitude.nii`
+3. Convert rad/s → Hz (divide by 2π) — SPM's FieldMap toolbox works in Hz
+4. For each task: SPM "Calculate VDM" from the precalculated fieldmap, matched
+   to that task's first EPI volume → `func/vdm_task-<N>.nii`
+5. Realign & Unwarp all tasks in one SPM batch
+6. Coregister T2w to the session mean; reslice ROI masks
+
+**Output in func/:** `u<BOLD>.nii`, `meanu<BOLD>.nii`, `rp_<BOLD>.txt`, `vdm_task-<N>.nii`
+**Output in anat/:** `r<ROI>.nii`
+
+The voxel-shift conversion is done by SPM, from `TOTAL_READOUT_MS` and
+`BLIP_DIRECTION` — this mode only converts the units of the input fieldmap.
+Set `EPI_BASED_FIELDMAP=0`: a fieldmap made from a GRE phasediff is not EPI-based.
+
+---
+
+#### Mode E: `realign_only`
 
 1. Decompress all `.nii.gz` to `.nii`
 2. Realign (estimate + write) all tasks in one SPM batch (motion correction only)
@@ -394,6 +419,8 @@ All modes produce `rp_*.txt` files with 6 columns: **3 translations (mm) and 3 r
 
 - **topup (vdm):** Uses reverse-PE EPI + FSL topup, but converts the field to an SPM VDM so that SPM Realign & Unwarp handles both motion and distortion jointly. Same requirements as topup+applytopup.
 
+- **precalc_fieldmap:** Uses a ready-made B0 fieldmap (in rad/s or Hz) plus its magnitude, fed to SPM's FieldMap toolbox as a "precalculated fieldmap", then Realign & Unwarp. Use when the session has a phasediff but no magnitude image — `make_fieldmaps.sh` builds both from the T1w. Requires correct readout time and blip direction, and `EPI_BASED_FIELDMAP=0`.
+
 - **realign_only:** Motion correction only. No fieldmap needed. Use if no fieldmap/reverse-PE is available.
 
 **Input (all modes):**
@@ -407,6 +434,88 @@ All modes produce `rp_*.txt` files with 6 columns: **3 translations (mm) and 3 r
 - `PREPROC_MEM_PER_CPU` — Memory per CPU (default: 12G)
 - `PREPROC_TIME` — Wall-clock limit per job (default: 10:00:00)
 - `SLURM_PARTITION` — HPC partition name (default: compute)
+
+---
+
+#### Building fieldmaps from a structural
+
+Some sessions come back from the scanner with a phase-difference image but no
+magnitude image. `fsl_prepare_fieldmap` needs a magnitude to unwrap the phase
+against, so those sessions cannot be turned into a fieldmap directly.
+`make_fieldmaps.sh` builds the missing magnitude out of the T1w:
+
+| Step | Command | Why |
+|------|---------|-----|
+| 1 | `bet <T1w> T1w_brain -m` | brain-extract the T1w, keeping the mask |
+| 2 | `flirt -in <T1w> -ref <phasediff> -applyxfm -usesqform` | resample the T1w onto the phasediff grid using the stored scanner coordinates — no registration is estimated |
+| 3 | `flirt` the mask the same way, `-interp nearestneighbour` | keeps the mask binary |
+| 4 | `fslmaths <resampled T1w> -mas <resampled mask>` | brain-only pseudo-magnitude |
+| 5 | `fsl_prepare_fieldmap SIEMENS <phasediff> <mag> fieldmap <ΔTE>` | unwrap the phase → fieldmap in rad/s |
+
+```bash
+bash make_fieldmaps.sh --dry-run     # see what it would do
+bash make_fieldmaps.sh               # write the fieldmaps
+```
+
+…or menu options `B` (dry-run) and `BX` (execute) in `run_pipeline.sh`.
+
+**What it writes** — BIDS "Case 3" names, in each session's `fmap/`, carrying the
+same entities as the phasediff it came from:
+
+```
+fmap/<sub>_<ses>[_run-N]_fieldmap.nii[.gz]    the fieldmap, in rad/s
+fmap/<sub>_<ses>[_run-N]_magnitude.nii[.gz]   the brain-only magnitude
+fmap/<sub>_<ses>[_run-N]_fieldmap.json        Units, IntendedFor, provenance
+```
+
+Intermediates go to a temporary `fmap/.work_<stem>/` that is deleted at the end
+(`--keep-work` keeps it). Nothing is written to `anat/`, and the names cannot be
+mistaken for a `phasediff`, a `magnitude1`, a `T2w` or a VDM, so the rest of the
+pipeline is unaffected for sessions you do not run it on.
+
+**Then preprocess with:**
+
+```bash
+# in pipeline_config.cfg
+PREPROC_MODE=precalc_fieldmap
+EPI_BASED_FIELDMAP=0      # a GRE-derived fieldmap is not EPI-based
+VDM_MASKBRAIN=0           # the magnitude is already brain-only
+```
+
+**ΔTE** is read per session from the phasediff JSON (`EchoTime2 - EchoTime1`,
+converted to ms), so it is right even when it varies across your dataset. Override
+it with `FIELDMAP_DELTA_TE` in the config or `--delta-te`.
+
+**Which magnitude gets used.** `FIELDMAP_MAGNITUDE_SOURCE` (or
+`--magnitude-source`) controls this:
+
+- `structural` (default) — always build the magnitude from the T1w. Every session
+  is processed identically, which is what you want when you compare sessions
+  within a subject.
+- `auto` — use the session's real `*_magnitude1` image when it has one, T1w
+  otherwise. Better for any single session taken alone, but it mixes two kinds of
+  magnitude across a longitudinal dataset.
+
+Sessions that already have a real `magnitude1` do not need this script at all —
+they can use `PREPROC_MODE=realign_unwarp` directly.
+
+**Other options:** `--sub`/`--ses` for one session, `--list FILE` for a different
+subject list, `--force` to rebuild existing fieldmaps, `--dry-run` to print the
+FSL commands without running them.
+
+**Caveats**
+
+- Step 2 resamples with `-usesqform`, which trusts the sform/qform of both images.
+  If the T1w and the phasediff disagree about scanner coordinates — different
+  scan sessions, or a header that was edited — the pseudo-magnitude will be
+  misaligned and the unwrapping will be wrong. Check one session's
+  `_magnitude.nii` against its `_fieldmap.nii` before trusting the batch.
+- A T1w-derived magnitude has different contrast from a real GRE magnitude. It is
+  used only to mask and to guide phase unwrapping, not in the fieldmap values
+  themselves, but a bad `bet` will still cost you brain edge. Tune with
+  `FIELDMAP_BET_F` and inspect with `--keep-work`.
+- The script needs FSL on PATH (`module load fsl`). It runs locally rather than
+  through SLURM — a full dataset is a few minutes.
 
 ---
 
@@ -693,10 +802,12 @@ F)  Filter subject/session list (filter_subses_list.sh)
 3)  Prepare for GridCAT (run_prep.sh)
 4)  Run GridCAT analysis (run_gridcat.sh)
 5)  Collect results (collect_gridcat_output.R)
+B)  Build fieldmaps from T1w + phasediff (dry-run)
+BX) Build fieldmaps from T1w + phasediff (execute)
 A)  Run all steps (0-5 in sequence)
 Q)  Quit
 
-Select [0-5/2S/F/A/Q]:
+Select [0-5/2S/F/A/B/BX/Q]:
 ```
 
 **Recommended workflow:**

@@ -67,6 +67,7 @@ echo ""
 declare -i multi_t2w_count=0
 declare -i multi_bold_count=0
 declare -i multi_reverse_count=0
+declare -i multi_fieldmap_count=0
 declare -i total_entries=0
 
 # Start building TSV content
@@ -83,6 +84,7 @@ for sub_dir in "$BIDS_ROOT"/sub-*/; do
         SES=$(basename "$ses_dir")
         anat_dir="$ses_dir/anat"
         func_dir="$ses_dir/func"
+        fmap_dir="$ses_dir/fmap"
 
         # ----- Check for multi-run T2w -----
         if [[ -d "$anat_dir" ]]; then
@@ -191,6 +193,37 @@ for sub_dir in "$BIDS_ROOT"/sub-*/; do
                 TSV_LINES+=("${SUB}\t${SES}\ttask-reverse\t${runs}\t")
             fi
         fi
+
+        # ----- Check for multi-run fieldmaps (PREPROC_MODE=precalc_fieldmap) -----
+        # These are what make_fieldmaps.sh writes. The name must start with
+        # <sub>_<ses> so leftovers such as vdm5_*_fieldmap.nii are ignored.
+        if [[ -d "$fmap_dir" ]]; then
+            FIELDMAP_FILES=()
+            while IFS= read -r -d '' f; do
+                FIELDMAP_FILES+=("$(basename "$f")")
+            done < <(find "$fmap_dir" -maxdepth 1 \
+                        \( -name "${SUB}_${SES}*_fieldmap.nii" -o -name "${SUB}_${SES}*_fieldmap.nii.gz" \) \
+                        -print0 2>/dev/null)
+
+            if [[ ${#FIELDMAP_FILES[@]} -gt 1 ]]; then
+                ((multi_fieldmap_count++)) || true
+                ((total_entries++)) || true
+
+                runs=""
+                for f in "${FIELDMAP_FILES[@]}"; do
+                    if [[ "$f" =~ _run-([0-9]+) ]]; then
+                        run_label="run-${BASH_REMATCH[1]}"
+                    else
+                        run_label="no-run-label"
+                    fi
+                    if [[ -n "$runs" ]]; then runs+=","; fi
+                    runs+="$run_label"
+                done
+                runs=$(echo "$runs" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
+
+                TSV_LINES+=("${SUB}\t${SES}\tfieldmap\t${runs}\t")
+            fi
+        fi
     done
 done
 
@@ -220,6 +253,7 @@ echo -e "${YELLOW}Multi-run cases found:${NC}"
 echo "  T2w multi-run:       $multi_t2w_count subject-sessions"
 echo "  Task BOLD multi-run: $multi_bold_count subject-session-tasks"
 echo "  Reverse multi-run:   $multi_reverse_count subject-sessions"
+echo "  Fieldmap multi-run:  $multi_fieldmap_count subject-sessions"
 echo ""
 echo "  Total entries:       $total_entries"
 echo ""
@@ -239,6 +273,7 @@ echo "If 'selected_run' is left empty for an entry, the pipeline will:"
 echo "  - For T2w: use the LAST run (highest run number)"
 echo "  - For task BOLD: use the LAST run (highest run number)"
 echo "  - For reverse-PE: use the FIRST run (lowest run number)"
+echo "  - For fieldmap:   use the LAST run (highest run number)"
 echo ""
 echo -e "${YELLOW}Preview of run_selection.tsv:${NC}"
 echo "---"

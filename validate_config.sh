@@ -266,11 +266,45 @@ fi
 if [[ -z "${PREPROC_MODE:-}" ]]; then
     print_check_fail "PREPROC_MODE is not defined"
 else
-    if [[ "$PREPROC_MODE" =~ ^(realign_unwarp|topup|realign_only)$ ]]; then
+    if [[ "$PREPROC_MODE" =~ ^(realign_unwarp|topup|realign_only|precalc_fieldmap)$ ]]; then
         print_check_pass "PREPROC_MODE is valid"
         print_detail "Mode: $PREPROC_MODE"
     else
-        print_check_fail "PREPROC_MODE must be 'realign_unwarp', 'topup', or 'realign_only' (got $PREPROC_MODE)"
+        print_check_fail "PREPROC_MODE must be 'realign_unwarp', 'topup', 'precalc_fieldmap', or 'realign_only' (got $PREPROC_MODE)"
+    fi
+fi
+
+# Validate fieldmap settings (make_fieldmaps.sh + PREPROC_MODE=precalc_fieldmap)
+if [[ -n "${FIELDMAP_SCANNER:-}" ]] && [[ ! "$FIELDMAP_SCANNER" =~ ^(SIEMENS|PHILIPS)$ ]]; then
+    print_check_fail "FIELDMAP_SCANNER must be 'SIEMENS' or 'PHILIPS' (got $FIELDMAP_SCANNER)"
+fi
+if [[ -n "${FIELDMAP_MAGNITUDE_SOURCE:-}" ]] && [[ ! "$FIELDMAP_MAGNITUDE_SOURCE" =~ ^(structural|auto)$ ]]; then
+    print_check_fail "FIELDMAP_MAGNITUDE_SOURCE must be 'structural' or 'auto' (got $FIELDMAP_MAGNITUDE_SOURCE)"
+fi
+if [[ -n "${FIELDMAP_DELTA_TE:-}" ]] && [[ ! "$FIELDMAP_DELTA_TE" =~ ^[0-9]*\.?[0-9]+$ ]]; then
+    print_check_fail "FIELDMAP_DELTA_TE must be a number in ms, or empty to read it from the phasediff JSON (got $FIELDMAP_DELTA_TE)"
+fi
+
+if [[ "${PREPROC_MODE:-}" == "precalc_fieldmap" ]]; then
+    FM_UNITS_LC=$(printf '%s' "${FIELDMAP_UNITS:-rad/s}" | tr '[:upper:]' '[:lower:]')
+    if [[ "$FM_UNITS_LC" =~ ^(rad/s|rads|rad_per_s|hz)$ ]]; then
+        print_check_pass "FIELDMAP_UNITS is valid"
+        print_detail "Units: ${FIELDMAP_UNITS:-rad/s}"
+        if [[ "$FM_UNITS_LC" == "hz" ]]; then
+            print_check_warn "FIELDMAP_UNITS=Hz — fsl_prepare_fieldmap writes rad/s, so only use Hz if you converted the fieldmap yourself"
+        fi
+    else
+        print_check_fail "FIELDMAP_UNITS must be 'rad/s' or 'Hz' (got $FIELDMAP_UNITS)"
+    fi
+
+    # A fieldmap built from a GRE phasediff is not EPI-based
+    if [[ "${EPI_BASED_FIELDMAP:-}" != "0" ]]; then
+        print_check_warn "EPI_BASED_FIELDMAP=${EPI_BASED_FIELDMAP:-<not set>} with PREPROC_MODE=precalc_fieldmap"
+        print_detail "A fieldmap made from a GRE phasediff is NOT EPI-based — set EPI_BASED_FIELDMAP=0"
+    fi
+    if [[ "${VDM_MASKBRAIN:-}" == "1" ]]; then
+        print_check_warn "VDM_MASKBRAIN=1 with PREPROC_MODE=precalc_fieldmap"
+        print_detail "make_fieldmaps.sh already writes a brain-only magnitude; consider VDM_MASKBRAIN=0 to avoid masking twice"
     fi
 fi
 

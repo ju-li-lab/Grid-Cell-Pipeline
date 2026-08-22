@@ -47,6 +47,10 @@
 #          resume from fieldmaps you produced yourself, or to redo just the    #
 #          smoothing without repeating the realignment.                        #
 #                                                                              #
+#          If a session has a phasediff but no magnitude image, build the      #
+#          fieldmap first with menu option B/BX (make_fieldmaps.sh), then set   #
+#          PREPROC_MODE=precalc_fieldmap.                                       #
+#                                                                              #
 #  Step 3: Prepare data for GridCAT                                           #
 #          Reorganizes preprocessed data into the format required by GridCAT. #
 #          (Runs run_prep.sh which calls prepare_gridcat_directory.m)         #
@@ -658,7 +662,9 @@ show_main_menu() {
     printf "Data Preparation:\n"
     printf "  ${BLUE}[M]${NC}  Scan for multi-run cases (T2w/BOLD)\n"
     printf "  ${BLUE}[R]${NC}  Move ROI masks into BIDS (dry-run)\n"
-    printf "  ${BLUE}[RX]${NC} Move ROI masks into BIDS (execute)\n\n"
+    printf "  ${BLUE}[RX]${NC} Move ROI masks into BIDS (execute)\n"
+    printf "  ${BLUE}[B]${NC}  Build fieldmaps from T1w + phasediff (dry-run)\n"
+    printf "  ${BLUE}[BX]${NC} Build fieldmaps from T1w + phasediff (execute)\n\n"
 
     printf "Batch Operations:\n"
     printf "  ${BLUE}[A]${NC}  Run ALL steps (0→1 locally, then 2→3→4 chained on SLURM)\n"
@@ -714,6 +720,20 @@ show_settings() {
         printf "  Interpolation:         ${TOPUP_INTERP:-<not set>}\n"
         printf "  Existing topup prefix: ${TOPUP_EXISTING_PREFIX:-<use func/topup_results>}\n\n"
     fi
+
+    if [[ "${PREPROC_MODE:-}" == "precalc_fieldmap" ]]; then
+        printf "${BLUE}Precalculated Fieldmap Settings:${NC}\n"
+        printf "  Fieldmap Pattern:      ${FIELDMAP_PATTERN:-_fieldmap}\n"
+        printf "  Magnitude Pattern:     ${FIELDMAP_MAGNITUDE_PATTERN:-_magnitude}\n"
+        printf "  Fieldmap Units:        ${FIELDMAP_UNITS:-rad/s}\n"
+        printf "  EPI-based Fieldmap:    ${EPI_BASED_FIELDMAP:-<not set>} (should be 0)\n\n"
+    fi
+
+    printf "${BLUE}Fieldmap Builder (make_fieldmaps.sh):${NC}\n"
+    printf "  Scanner:               ${FIELDMAP_SCANNER:-SIEMENS}\n"
+    printf "  Delta TE (ms):         ${FIELDMAP_DELTA_TE:-<from phasediff JSON>}\n"
+    printf "  BET -f:                ${FIELDMAP_BET_F:-0.5}\n"
+    printf "  Magnitude Source:      ${FIELDMAP_MAGNITUDE_SOURCE:-structural}\n\n"
 
     printf "${BLUE}Study Design:${NC}\n"
     printf "  Tasks:                 ${TASKS:-<not set>}\n"
@@ -986,6 +1006,28 @@ main() {
                 printf "\nPress Enter to continue..."
                 read -r
                 ;;
+            [Bb][Xx])
+                print_header "Build Fieldmaps from Structural (EXECUTE)"
+                printf "${YELLOW}This runs FSL (bet/flirt/fsl_prepare_fieldmap) and writes${NC}\n"
+                printf "${YELLOW}new *_fieldmap / *_magnitude files into each session's fmap/.${NC}\n"
+                printf "Are you sure? (y/N): "
+                read -r confirm
+                if [[ "${confirm}" =~ ^[Yy]$ ]]; then
+                    log_message "INFO" "Running fieldmap builder (execute)"
+                    bash "${SCRIPT_DIR}/make_fieldmaps.sh" 2>&1 | tee -a "$LOG_FILE"
+                else
+                    print_info "Cancelled."
+                fi
+                printf "\nPress Enter to continue..."
+                read -r
+                ;;
+            [Bb])
+                print_header "Build Fieldmaps from Structural (dry-run)"
+                log_message "INFO" "Running fieldmap builder (dry-run)"
+                bash "${SCRIPT_DIR}/make_fieldmaps.sh" --dry-run 2>&1 | tee -a "$LOG_FILE"
+                printf "\nPress Enter to continue..."
+                read -r
+                ;;
             [Rr][Xx])
                 print_header "Move ROI Masks (EXECUTE)"
                 printf "${YELLOW}This will copy and rename ROI files into BIDS anat/ folders.${NC}\n"
@@ -1013,7 +1055,7 @@ main() {
                 exit 0
                 ;;
             *)
-                print_error "Invalid choice. Please enter 0-4, 2S, F, A, S, C, L, M, R, RX, or Q."
+                print_error "Invalid choice. Please enter 0-4, 2S, F, A, S, C, L, M, R, RX, B, BX, or Q."
                 printf "\nPress Enter to continue..."
                 read -r
                 ;;
