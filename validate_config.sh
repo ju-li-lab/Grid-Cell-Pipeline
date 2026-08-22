@@ -274,6 +274,51 @@ else
     fi
 fi
 
+# Validate PREPROC_STAGES
+if [[ -z "${PREPROC_STAGES:-}" ]]; then
+    print_check_warn "PREPROC_STAGES not defined (will default to 'all')"
+else
+    STAGE_LIST="${PREPROC_STAGES// /}"
+    VALID_STAGE_NAMES=" topup vdm realign coreg smooth all fieldmap fieldmaps fmap post_fieldmap postfieldmap post-fieldmap unwarp realign_unwarp "
+    STAGE_OK=true
+    OLD_IFS="$IFS"
+    IFS=','
+    for STAGE_PART in $STAGE_LIST; do
+        if [[ ! "$VALID_STAGE_NAMES" == *" ${STAGE_PART} "* ]]; then
+            print_check_fail "PREPROC_STAGES contains unknown stage: '${STAGE_PART}'"
+            print_detail "Valid stages: topup, vdm, realign, coreg, smooth"
+            print_detail "Shorthands:   all, fieldmap, post_fieldmap"
+            STAGE_OK=false
+        fi
+    done
+    IFS="$OLD_IFS"
+
+    if [[ "$STAGE_OK" == "true" ]]; then
+        print_check_pass "PREPROC_STAGES is valid"
+        print_detail "Stages: $STAGE_LIST"
+        if [[ "$STAGE_LIST" != "all" ]]; then
+            print_check_warn "PARTIAL preprocessing run — only these stages will execute: $STAGE_LIST"
+            print_detail "Everything the skipped stages would have produced must already be on disk"
+        fi
+    fi
+fi
+
+# Validate TOPUP_EXISTING_PREFIX (pre-computed topup output)
+if [[ -n "${TOPUP_EXISTING_PREFIX:-}" ]]; then
+    if [[ "${PREPROC_MODE:-}" != "topup" ]]; then
+        print_check_warn "TOPUP_EXISTING_PREFIX is set but PREPROC_MODE is '${PREPROC_MODE:-<not set>}' — it will be ignored"
+    elif [[ ",${PREPROC_STAGES:-all}," == *",all,"* ]] || [[ ",${PREPROC_STAGES:-all}," == *",topup,"* ]] || \
+         [[ ",${PREPROC_STAGES:-all}," == *",fieldmap,"* ]]; then
+        print_check_warn "TOPUP_EXISTING_PREFIX is set but the 'topup' stage is selected — the pipeline will estimate the field itself and ignore it"
+    else
+        print_check_pass "TOPUP_EXISTING_PREFIX is set (topup stage skipped)"
+        print_detail "Prefix: $TOPUP_EXISTING_PREFIX"
+        if [[ "$TOPUP_EXISTING_PREFIX" != *"{SUB}"* ]] && [[ "$TOPUP_EXISTING_PREFIX" != *"{SES}"* ]]; then
+            print_check_warn "TOPUP_EXISTING_PREFIX has no {SUB}/{SES} placeholder — every session will use the same fieldmap"
+        fi
+    fi
+fi
+
 # Validate ROI_MODE
 if [[ -z "${ROI_MODE:-}" ]]; then
     print_check_warn "ROI_MODE is not defined (will default to 'both')"

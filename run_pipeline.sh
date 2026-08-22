@@ -40,6 +40,13 @@
 #          Each subject/session is processed in parallel.                      #
 #          (Submits spm_preproc_array.sbatch)                                 #
 #                                                                              #
+#          Step 2 is itself split into five stages that can be run on their   #
+#          own: topup -> vdm -> realign -> coreg -> smooth. Pick them with     #
+#          menu option 2S, set PREPROC_STAGES in the config, or run            #
+#          submit_preproc.sh --stages <list> outside this menu. Use this to    #
+#          resume from fieldmaps you produced yourself, or to redo just the    #
+#          smoothing without repeating the realignment.                        #
+#                                                                              #
 #  Step 3: Prepare data for GridCAT                                           #
 #          Reorganizes preprocessed data into the format required by GridCAT. #
 #          (Runs run_prep.sh which calls prepare_gridcat_directory.m)         #
@@ -86,9 +93,12 @@ LOG_DIR="${SCRIPT_DIR}/logs"
 #                   (e.g. "afterok:1234"); empty for a standalone submission.
 # LAST_JOB_ID     : job id of the most recent successful submission (set by steps
 #                   2/3/4 so run-all can chain the next stage onto it).
+# PREPROC_STAGES_OVERRIDE : stage list chosen interactively for one Step 2
+#                   submission; empty means use PREPROC_STAGES from the config.
 ASSUME_YES=false
 NEXT_DEPENDENCY=""
 LAST_JOB_ID=""
+PREPROC_STAGES_OVERRIDE=""
 
 # Create logs directory if it doesn't exist
 mkdir -p "${LOG_DIR}"
@@ -331,8 +341,19 @@ run_step_2() {
     local num_subjects
     num_subjects=$(wc -l < "${SUBSES_LIST}")
 
+    # Stage list: an interactive choice wins over PREPROC_STAGES in the config.
+    local stages="${PREPROC_STAGES_OVERRIDE:-${PREPROC_STAGES:-all}}"
+    stages="${stages// /}"
+
+    # Partial runs get a job name that says which stages they cover, so they
+    # are recognisable in squeue next to a full preprocessing array.
+    local job_name="spm_preproc"
+    [[ "${stages}" != "all" ]] && job_name="spm_${stages//,/_}"
+
     print_info "This step will submit preprocessing jobs to the HPC cluster."
     printf "  Script:    spm_preproc_array.sbatch\n"
+    printf "  Stages:    ${stages}\n"
+    printf "  Mode:      ${PREPROC_MODE:-<not set>}\n"
     printf "  Array size: 1-%d (one job per subject/session)\n" "${num_subjects}"
     printf "  Subjects/sessions: %d\n" "${num_subjects}"
     printf "\nThese jobs will run in parallel on the cluster.\n"
@@ -361,6 +382,7 @@ run_step_2() {
     local sbatch_output
     if sbatch_output=$(sbatch \
         --export=ALL,PIPELINE_SCRIPT_DIR="${SCRIPT_DIR}" \
+        --job-name="${job_name}" \
         --partition="${SLURM_PARTITION}" \
         --time="${PREPROC_TIME}" \
         --cpus-per-task="${PREPROC_CPUS}" \
@@ -368,7 +390,7 @@ run_step_2() {
         --array=1-"${num_subjects}" \
         "${dep_flag[@]}" \
         "${mail_flag[@]}" \
-        "${SCRIPT_DIR}/spm_preproc_array.sbatch" 2>&1); then
+        "${SCRIPT_DIR}/spm_preproc_array.sbatch" --stages "${stages}" 2>&1); then
         print_success "Preprocessing jobs submitted!"
 
         # Extract job ID from sbatch output
@@ -381,7 +403,7 @@ run_step_2() {
             printf "Array Range: 1-%d\n" "${num_subjects}"
             printf "\nYou can check the status of your jobs using:\n"
             printf "  squeue -j ${job_id}\n\n"
-            log_message "INFO" "Step 2 preprocessing jobs submitted with Job ID: ${job_id}"
+            log_message "INFO" "Step 2 preprocessing jobs submitted with Job ID: ${job_id} (stages: ${stages})"
         else
             printf "\n${GREEN}${sbatch_output}${NC}\n"
             log_message "INFO" "Step 2 preprocessing jobs submitted"
@@ -396,6 +418,97 @@ run_step_2() {
         log_message "ERROR" "Step 2 failed to submit jobs: ${sbatch_output}"
         return 1
     fi
+}
+
+# Step 2 (partial): pick which preprocessing stages to submit
+#
+# The SPM preprocessing is split into five stages that each read what they need
+# from disk, so any suffix of the pipeline can be re-run on its own. This lets
+# you stop after the fieldmaps, swap in fieldmaps you made yourself, or redo
+# just the smoothing without repeating the expensive realignment.
+run_step_2_stages() {
+    print_header "STEP 2 (partial): Choose Preprocessing Stages"
+
+    printf "The preprocessing runs as five stages, in this order:\n\n"
+    printf "  ${BLUE}topup${NC}    Estimate the distortion field with FSL topup\n"
+    printf "           ${BLUE}->${NC} func/topup_results_*, func/topup_acqparams.txt\n"
+    printf "  ${BLUE}vdm${NC}      Build one voxel displacement map per task\n"
+    printf "           ${BLUE}->${NC} func/vdm_task-<N>.nii\n"
+    printf "  ${BLUE}realign${NC}  Apply the correction + motion correction\n"
+    printf "           ${BLUE}->${NC} func/u*_bold.nii, rp_*.txt, meanu_session.nii\n"
+    printf "  ${BLUE}coreg${NC}    Coregister T2w -> session mean, reslice ROI masks\n"
+    printf "           ${BLUE}->${NC} anat/r*_mask.nii\n"
+    printf "  ${BLUE}smooth${NC}   Gaussian smoothing of the preprocessed BOLD\n"
+    printf "           ${BLUE}->${NC} func/su*_bold.nii\n\n"
+
+    printf "Presets:\n"
+    printf "  ${BLUE}[1]${NC} all                        — the complete preprocessing\n"
+    printf "  ${BLUE}[2]${NC} fieldmap                   — topup + vdm, then stop\n"
+    printf "  ${BLUE}[3]${NC} vdm,realign,coreg,smooth   — resume from topup output made elsewhere\n"
+    printf "  ${BLUE}[4]${NC} realign,coreg,smooth       — resume from ready-made VDMs\n"
+    printf "  ${BLUE}[5]${NC} coreg,smooth               — redo coregistration and smoothing\n"
+    printf "  ${BLUE}[6]${NC} smooth                     — re-smooth only\n"
+    printf "  ${BLUE}[C]${NC} custom                     — type your own comma-separated list\n"
+    printf "  ${BLUE}[X]${NC} cancel\n\n"
+
+    printf "Enter your choice: "
+    local pick
+    read -r pick
+
+    local stages=""
+    case "${pick}" in
+        1) stages="all" ;;
+        2) stages="fieldmap" ;;
+        3) stages="vdm,realign,coreg,smooth" ;;
+        4) stages="realign,coreg,smooth" ;;
+        5) stages="coreg,smooth" ;;
+        6) stages="smooth" ;;
+        [Cc])
+            printf "Stages (comma-separated, e.g. realign,coreg,smooth): "
+            read -r stages
+            ;;
+        [Xx])
+            print_info "Cancelled."
+            return 0
+            ;;
+        *)
+            print_error "Invalid choice."
+            return 1
+            ;;
+    esac
+
+    stages="${stages// /}"
+    if [[ -z "${stages}" ]]; then
+        print_error "No stages given."
+        return 1
+    fi
+
+    # Reject typos before anything reaches the cluster
+    local valid=" topup vdm realign coreg smooth all fieldmap post_fieldmap "
+    local part
+    local IFS=','
+    for part in ${stages}; do
+        if [[ ! "${valid}" == *" ${part} "* ]]; then
+            print_error "Unknown stage: '${part}'"
+            printf "  Valid stages: topup, vdm, realign, coreg, smooth\n"
+            printf "  Shorthands:   all, fieldmap, post_fieldmap\n"
+            return 1
+        fi
+    done
+    unset IFS
+
+    if [[ "${PREPROC_MODE:-}" != "topup" ]] && [[ ",${stages}," == *",topup,"* ]]; then
+        print_warning "PREPROC_MODE is '${PREPROC_MODE:-<not set>}', so the topup stage will do nothing."
+    fi
+
+    print_info "Stages selected: ${stages}"
+    printf "\n"
+
+    PREPROC_STAGES_OVERRIDE="${stages}"
+    local rc=0
+    run_step_2 || rc=$?
+    PREPROC_STAGES_OVERRIDE=""
+    return "${rc}"
 }
 
 # Step 3: Prepare data for GridCAT
@@ -538,6 +651,7 @@ show_main_menu() {
     printf "  ${BLUE}[F]${NC}  Filter subject/session list\n"
     printf "  ${BLUE}[1]${NC}  Validate configuration\n"
     printf "  ${BLUE}[2]${NC}  Run SPM preprocessing (SLURM)\n"
+    printf "  ${BLUE}[2S]${NC} Run SPM preprocessing — pick stages (SLURM)\n"
     printf "  ${BLUE}[3]${NC}  Prepare data for GridCAT (SLURM)\n"
     printf "  ${BLUE}[4]${NC}  Run GridCAT analysis (SLURM)\n\n"
 
@@ -583,6 +697,7 @@ show_settings() {
 
     printf "${BLUE}Preprocessing Settings:${NC}\n"
     printf "  Preprocessing Mode:    ${PREPROC_MODE:-<not set>}\n"
+    printf "  Preprocessing Stages:  ${PREPROC_STAGES:-all}\n"
     printf "  Coregister ROIs:       ${DO_COREG_ROIS:-<not set>}\n"
     printf "  Reslice Prefix:        ${RESLICE_PREFIX:-<not set>}\n\n"
 
@@ -596,7 +711,8 @@ show_settings() {
         printf "  Reverse-PE Pattern:    ${TOPUP_REVERSE_PE_PATTERN:-<not set>}\n"
         printf "  Topup Config:          ${TOPUP_CONFIG:-<FSL default>}\n"
         printf "  Apply Method:          ${TOPUP_APPLY_METHOD:-<not set>}\n"
-        printf "  Interpolation:         ${TOPUP_INTERP:-<not set>}\n\n"
+        printf "  Interpolation:         ${TOPUP_INTERP:-<not set>}\n"
+        printf "  Existing topup prefix: ${TOPUP_EXISTING_PREFIX:-<use func/topup_results>}\n\n"
     fi
 
     printf "${BLUE}Study Design:${NC}\n"
@@ -823,6 +939,11 @@ main() {
                 printf "\nPress Enter to continue..."
                 read -r
                 ;;
+            [2][Ss])
+                run_step_2_stages
+                printf "\nPress Enter to continue..."
+                read -r
+                ;;
             2)
                 run_step_2
                 printf "\nPress Enter to continue..."
@@ -892,7 +1013,7 @@ main() {
                 exit 0
                 ;;
             *)
-                print_error "Invalid choice. Please enter 0-4, F, A, S, C, L, M, R, RX, or Q."
+                print_error "Invalid choice. Please enter 0-4, 2S, F, A, S, C, L, M, R, RX, or Q."
                 printf "\nPress Enter to continue..."
                 read -r
                 ;;

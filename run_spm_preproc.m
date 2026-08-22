@@ -1,24 +1,60 @@
-function run_spm_preproc(BIDS_ROOT, SUB, SES, cfgFile)
-% run_spm_preproc(BIDS_ROOT, SUB, SES, cfgFile)
+function run_spm_preproc(BIDS_ROOT, SUB, SES, cfgFile, stages)
+% run_spm_preproc(BIDS_ROOT, SUB, SES, cfgFile, stages)
+%
 % Example:
 %   run_spm_preproc('/sc-projects/.../b2_bids','sub-01s06','ses-01')
 %   run_spm_preproc('/sc-projects/.../b2_bids','sub-01s06','ses-01', '/path/to/pipeline_config.cfg')
+%   run_spm_preproc('/sc-projects/.../b2_bids','sub-01s06','ses-01', '', 'realign,coreg,smooth')
 %
 % For one subject/session:
-% - Finds fmap magnitude1 + phasediff (1 per session)
-% - For each task-1..3:
-%     * Calculates run-specific VDM using task's first volume as EPI reference
-%       (same phasediff+magnitude1, but matched to each run geometry)
-%     * Ensures VDM is moved/renamed into func/ as vdm_task-<n>.nii
-% - Runs Realign & Unwarp per session with 3 data blocks
+% - Finds fmap magnitude1 + phasediff, or the reverse phase-encode EPI
+% - For each task, builds a voxel displacement map matched to that run's geometry
+% - Runs Realign & Unwarp for the whole session with one data block per task
 %     (or Realign only, depending on PREPROC_MODE in config)
-% - Creates a session mean by averaging meanu(task-1..3)
-% - Coregisters T2w->session mean and reslices ROI left/right into EPI space
+% - Creates a session mean by averaging the per-task means
+% - Coregisters T2w -> session mean and reslices ROI left/right into EPI space
+% - Optionally smooths the preprocessed BOLD files
+%
+% STAGES (5th argument, or PREPROC_STAGES in pipeline_config.cfg)
+% ---------------------------------------------------------------
+% The work above is split into five stages that can be run independently. Every
+% stage reads what it needs from disk, so you can stop after any stage, inspect
+% or replace the intermediate files, and resume later.
+%
+%   topup    Estimate the distortion field with FSL topup. Writes
+%            <func>/topup_results_* and <func>/topup_acqparams.txt.
+%            Does nothing unless PREPROC_MODE=topup.
+%   vdm      Build one voxel displacement map per task: <func>/vdm_task-<N>.nii.
+%            Built from the GRE fieldmap (PREPROC_MODE=realign_unwarp) or from
+%            the topup field (PREPROC_MODE=topup, TOPUP_APPLY_METHOD=vdm).
+%            Does nothing for realign_only or for topup+applytopup.
+%   realign  Apply the correction and do motion correction: Realign & Unwarp,
+%            or applytopup followed by Realign, or Realign alone. Writes
+%            u*_bold.nii, rp_*.txt, the per-task means and meanu_session.nii.
+%   coreg    Coregister T2w -> session mean and reslice the ROI masks into EPI
+%            space (r*_mask.nii). Does nothing when DO_COREG_ROIS=0.
+%   smooth   Gaussian smoothing of the preprocessed BOLD files (su*_bold.nii).
+%            Does nothing when SMOOTH_FWHM=0.
+%
+% Accepted values: a comma-separated list of stage names, or one of the
+% shorthands 'all' (default), 'fieldmap' (= topup,vdm) and 'post_fieldmap'
+% (= realign,coreg,smooth). Order does not matter — stages always run in the
+% canonical order listed above.
+%
+% RESUMING FROM FIELDMAPS YOU MADE YOURSELF
+% -----------------------------------------
+% Put your FSL topup output on the cluster and point TOPUP_EXISTING_PREFIX at it
+% (or copy it into <func>/ as topup_results_*), then run the stages
+% 'vdm,realign,coreg,smooth'. Alternatively drop ready-made voxel displacement
+% maps in as <func>/vdm_task-<N>.nii and run 'realign,coreg,smooth'.
 %
 % All settings come from pipeline_config.cfg via read_pipeline_config.m
 
-% --------- Handle optional cfgFile argument ----------
-if nargin < 4 || isempty(cfgFile)
+% --------- Handle optional arguments ----------
+if nargin < 4, cfgFile = ''; end
+if nargin < 5, stages  = ''; end
+
+if isempty(cfgFile)
     % Auto-detect pipeline_config.cfg in same directory as this script
     scriptDir = fileparts(mfilename('fullpath'));
     cfgFile = fullfile(scriptDir, 'pipeline_config.cfg');
@@ -152,9 +188,31 @@ else
     CFG.SMOOTH_PREFIX = 's';
 end
 
+% Pre-computed FSL topup output (optional).
+% Points at topup results you produced yourself, so the "topup" stage can be
+% skipped. {SUB} and {SES} are substituted. Empty = use <func>/topup_results.
+if isfield(cfgRaw, 'TOPUP_EXISTING_PREFIX') && ~isempty(cfgRaw.TOPUP_EXISTING_PREFIX)
+    CFG.TOPUP_EXISTING_PREFIX = cfgRaw.TOPUP_EXISTING_PREFIX;
+else
+    CFG.TOPUP_EXISTING_PREFIX = '';
+end
+
+% --------- Resolve which stages to run ----------
+% Explicit argument wins over PREPROC_STAGES in the config file.
+if isempty(stages) && isfield(cfgRaw, 'PREPROC_STAGES')
+    stages = cfgRaw.PREPROC_STAGES;
+end
+STAGES = resolve_stages(stages);
+
 % --------- Safety / init ----------
 assert(isfolder(BIDS_ROOT), 'BIDS_ROOT not found: %s', BIDS_ROOT);
 assert(startsWith(SUB,'sub-') && startsWith(SES,'ses-'), 'SUB/SES must look like sub-01s06 / ses-01');
+assert(ismember(CFG.PREPROC_MODE, {'realign_unwarp','topup','realign_only'}), ...
+    'Unknown PREPROC_MODE: %s (must be realign_unwarp, topup or realign_only)', CFG.PREPROC_MODE);
+if strcmp(CFG.PREPROC_MODE, 'topup')
+    assert(ismember(CFG.TOPUP_APPLY_METHOD, {'applytopup','vdm'}), ...
+        'Unknown TOPUP_APPLY_METHOD: %s (must be applytopup or vdm)', CFG.TOPUP_APPLY_METHOD);
+end
 
 addpath(CFG.SPM_DIR);
 spm('defaults','FMRI');
@@ -166,29 +224,33 @@ anatDir = fullfile(subDir, 'anat');
 fmapDir = fullfile(subDir, 'fmap');
 
 assert(isfolder(funcDir), 'Missing func dir: %s', funcDir);
-assert(isfolder(anatDir), 'Missing anat dir: %s', anatDir);
-if strcmp(CFG.PREPROC_MODE, 'realign_unwarp')
-    assert(isfolder(fmapDir), 'Missing fmap dir: %s', fmapDir);
-elseif strcmp(CFG.PREPROC_MODE, 'topup')
-    % For topup: fmap required unless searching func only
-    if strcmp(CFG.TOPUP_REVERSE_PE_DIR, 'fmap')
-        assert(isfolder(fmapDir), 'Missing fmap dir: %s (TOPUP_REVERSE_PE_DIR=fmap)', fmapDir);
-    end
-    % 'auto' and 'func' don't strictly require fmap/
-end
 
 fprintf('\n=== %s / %s ===\n', SUB, SES);
 fprintf('Preprocessing mode: %s\n', CFG.PREPROC_MODE);
+fprintf('Stages to run:      %s\n', strjoin(STAGES.list, ' -> '));
+if ~isempty(STAGES.skipped)
+    fprintf('Stages skipped:     %s\n', strjoin(STAGES.skipped, ', '));
+end
+
+% --------- Which directories a run actually needs depends on the stages ------
+if STAGES.vdm && strcmp(CFG.PREPROC_MODE, 'realign_unwarp')
+    assert(isfolder(fmapDir), 'Missing fmap dir: %s', fmapDir);
+elseif STAGES.topup && strcmp(CFG.PREPROC_MODE, 'topup') && strcmp(CFG.TOPUP_REVERSE_PE_DIR, 'fmap')
+    assert(isfolder(fmapDir), 'Missing fmap dir: %s (TOPUP_REVERSE_PE_DIR=fmap)', fmapDir);
+end
+if STAGES.coreg && CFG.DO_COREG_ROIS
+    assert(isfolder(anatDir), 'Missing anat dir: %s', anatDir);
+end
 
 % --------- Load run selection (multi-run overrides) ----------
 runSel = load_run_selection(CFG.RUN_SELECTION_FILE, SUB, SES);
 
-% --------- Find fieldmap files ----------
+% --------- Find fieldmap inputs (only for the stages that consume them) -----
 phasemap = '';
 magnitude1 = '';
 reversePE_epi = '';
 
-if strcmp(CFG.PREPROC_MODE, 'realign_unwarp')
+if strcmp(CFG.PREPROC_MODE, 'realign_unwarp') && STAGES.vdm
     % GRE fieldmap mode: need phasediff + magnitude1
     phasemap = first_match(fmapDir, [SUB '_' SES '.*phasediff.*\.nii$']);
     if isempty(phasemap)
@@ -208,7 +270,7 @@ if strcmp(CFG.PREPROC_MODE, 'realign_unwarp')
     fprintf('Fieldmap phasediff:  %s\n', phasemap);
     fprintf('Fieldmap magnitude1: %s\n', magnitude1);
 
-elseif strcmp(CFG.PREPROC_MODE, 'topup')
+elseif strcmp(CFG.PREPROC_MODE, 'topup') && STAGES.topup
     % Topup mode: find the reverse-PE EPI.
     % Search directories based on TOPUP_REVERSE_PE_DIR setting:
     %   'fmap' = fmap/ only, 'func' = func/ only, 'auto' = fmap/ then func/
@@ -217,16 +279,18 @@ elseif strcmp(CFG.PREPROC_MODE, 'topup')
     fprintf('Topup apply method: %s\n', CFG.TOPUP_APPLY_METHOD);
 end
 
-% --------- Find T2w (handles multi-run) ----------
-t2w = find_t2w(anatDir, SUB, SES, runSel);
-t2w = ensure_nii(t2w);  % decompress .nii.gz for SPM
-fprintf('T2w: %s\n', t2w);
+% --------- Find T2w + ROIs (only the coreg stage uses them) ----------
+t2w = '';
+roiL = ''; roiR = ''; hasRoiL = false; hasRoiR = false;
 
-% --------- Find ROIs (flexible matching) ----------
-[roiL, roiR, hasRoiL, hasRoiR] = find_rois(anatDir, SUB, SES, CFG);
-if hasRoiL, roiL = ensure_nii(roiL); end  % decompress .nii.gz for SPM
-if hasRoiR, roiR = ensure_nii(roiR); end
-if CFG.DO_COREG_ROIS
+if STAGES.coreg && CFG.DO_COREG_ROIS
+    t2w = find_t2w(anatDir, SUB, SES, runSel);
+    t2w = ensure_nii(t2w);  % decompress .nii.gz for SPM
+    fprintf('T2w: %s\n', t2w);
+
+    [roiL, roiR, hasRoiL, hasRoiR] = find_rois(anatDir, SUB, SES, CFG);
+    if hasRoiL, roiL = ensure_nii(roiL); end  % decompress .nii.gz for SPM
+    if hasRoiR, roiR = ensure_nii(roiR); end
     fprintf('ROI left exists:  %d', hasRoiL);
     if hasRoiL, fprintf(' (%s)', roiL); end
     fprintf('\n');
@@ -236,167 +300,176 @@ if CFG.DO_COREG_ROIS
 end
 
 % --------- Validate config against BIDS JSON sidecars ----------
-validate_bids_params(funcDir, fmapDir, SUB, SES, CFG);
+% Only meaningful for the stages that read acquisition parameters.
+if STAGES.topup || STAGES.vdm || STAGES.realign
+    validate_bids_params(funcDir, fmapDir, SUB, SES, CFG);
+end
 
-% --------- Prepare per-task scans + per-task VDMs ----------
+% --------- Locate the BOLD run for each task ----------
 nTasks = numel(CFG.TASK_LABELS);
 taskVols      = cell(nTasks,1);
 taskVDM       = cell(nTasks,1);
 taskBoldFiles = cell(nTasks,1);
-meanu_imgs    = cell(0,1);
+
+needVols = STAGES.vdm || STAGES.realign;
 
 for ii = 1:nTasks
     tLabel = CFG.TASK_LABELS{ii};   % e.g. 'run1', '1', 'run2', etc.
 
     boldFile = find_bold(funcDir, SUB, SES, tLabel, runSel);
     boldFile = ensure_nii(boldFile);  % decompress .nii.gz for SPM
-
     taskBoldFiles{ii} = boldFile;
-    vols = expand_4d(boldFile);     % cellstr of '...nii,1' '...nii,2' ...
-    epiRef = vols{1};               % char: first volume as VDM reference
+    taskVDM{ii} = '';
 
     fprintf('\n--- Task %s ---\n', tLabel);
     fprintf('BOLD: %s\n', boldFile);
 
-    % For realign_unwarp mode: calculate VDM matched to this run's EPI reference
-    if strcmp(CFG.PREPROC_MODE, 'realign_unwarp')
-        fprintf('Calculating VDM for task-%s...\n', tLabel);
-        vdm_out = calc_vdm_for_run_to_func(phasemap, magnitude1, epiRef, funcDir, fmapDir, CFG, ii);
-        fprintf('VDM saved: %s\n', vdm_out);
-        taskVDM{ii} = vdm_out;
-    else
-        taskVDM{ii} = '';
+    if needVols
+        taskVols{ii} = expand_4d(boldFile);   % cellstr of '...nii,1' '...nii,2' ...
     end
-
-    taskVols{ii} = vols;
 end
 
-% --------- Run distortion correction + motion correction ----------
-fprintf('\nRunning preprocessing job for all tasks...\n');
+% Does this configuration need voxel displacement maps at all?
+needVDM = strcmp(CFG.PREPROC_MODE, 'realign_unwarp') || ...
+          (strcmp(CFG.PREPROC_MODE, 'topup') && strcmp(CFG.TOPUP_APPLY_METHOD, 'vdm'));
 
-if strcmp(CFG.PREPROC_MODE, 'realign_unwarp')
-    run_realign_unwarp_multi(taskVols, taskVDM, CFG);
+% =====================================================================
+%  STAGE topup — estimate the distortion field with FSL
+% =====================================================================
+topupPrefix  = '';
+topupAcqFile = '';
 
-elseif strcmp(CFG.PREPROC_MODE, 'topup')
-    % --- FSL TOPUP pathway ---
-    % Step 1: Run FSL topup to estimate the distortion field (once per session)
-    fprintf('\n--- Running FSL topup (session-level) ---\n');
-    topupPrefix = fullfile(funcDir, 'topup_results');
-    run_fsl_topup(taskBoldFiles{1}, reversePE_epi, topupPrefix, CFG);
+if strcmp(CFG.PREPROC_MODE, 'topup') && (STAGES.topup || STAGES.vdm || STAGES.realign)
+    topupPrefix = resolve_topup_prefix(funcDir, SUB, SES, CFG, ~STAGES.topup);
 
-    if strcmp(CFG.TOPUP_APPLY_METHOD, 'applytopup')
-        % Step 2a: Apply topup correction to each task's 4D BOLD, then realign
+    if STAGES.topup
+        fprintf('\n=== STAGE topup: FSL topup field estimation ===\n');
+        run_fsl_topup(taskBoldFiles{1}, reversePE_epi, topupPrefix, CFG);
+    else
+        fprintf('\n=== STAGE topup: skipped, reusing existing topup output ===\n');
+        assert_topup_outputs(topupPrefix, CFG, STAGES);
+    end
+    fprintf('Topup prefix: %s\n', topupPrefix);
+
+    if STAGES.realign && strcmp(CFG.TOPUP_APPLY_METHOD, 'applytopup')
+        topupAcqFile = resolve_acqparams(topupPrefix, funcDir, CFG);
+        fprintf('Topup acqparams: %s\n', topupAcqFile);
+    end
+end
+
+% =====================================================================
+%  STAGE vdm — one voxel displacement map per task
+% =====================================================================
+if STAGES.vdm
+    if ~needVDM
+        fprintf('\n=== STAGE vdm: nothing to build in mode %s ===\n', CFG.PREPROC_MODE);
+    else
+        fprintf('\n=== STAGE vdm: building voxel displacement maps ===\n');
+        for ii = 1:nTasks
+            tLabel = CFG.TASK_LABELS{ii};
+            epiRef = taskVols{ii}{1};   % first volume as VDM reference
+            if strcmp(CFG.PREPROC_MODE, 'realign_unwarp')
+                fprintf('Calculating VDM for task-%s...\n', tLabel);
+                taskVDM{ii} = calc_vdm_for_run_to_func(phasemap, magnitude1, epiRef, funcDir, fmapDir, CFG, ii);
+            else
+                fprintf('Converting topup field to VDM for task-%s...\n', tLabel);
+                taskVDM{ii} = convert_topup_to_vdm(topupPrefix, epiRef, funcDir, CFG, ii);
+            end
+            fprintf('VDM (task-%s): %s\n', tLabel, taskVDM{ii});
+        end
+    end
+end
+
+% =====================================================================
+%  STAGE realign — apply the correction + motion correction
+% =====================================================================
+sessionMean     = '';
+haveSessionMean = false;
+
+if STAGES.realign
+    fprintf('\n=== STAGE realign: %s ===\n', CFG.PREPROC_MODE);
+
+    if needVDM
+        % Fill in any VDM this run did not build itself (vdm stage skipped)
+        for ii = 1:nTasks
+            if isempty(taskVDM{ii})
+                taskVDM{ii} = existing_task_vdm(funcDir, ii);
+                assert(~isempty(taskVDM{ii}), [ ...
+                    'No voxel displacement map for task %d (%s).\n' ...
+                    'Expected: %s\n' ...
+                    'Run the "vdm" stage first, or copy a ready-made VDM to that path.'], ...
+                    ii, CFG.TASK_LABELS{ii}, fullfile(funcDir, sprintf('vdm_task-%d.nii', ii)));
+                fprintf('Reusing existing VDM (task-%s): %s\n', CFG.TASK_LABELS{ii}, taskVDM{ii});
+            end
+        end
+    end
+
+    if strcmp(CFG.PREPROC_MODE, 'topup') && strcmp(CFG.TOPUP_APPLY_METHOD, 'applytopup')
+        % Correct each task's 4D BOLD with applytopup, then realign only
         fprintf('\n--- Applying topup correction via applytopup ---\n');
-        correctedBoldFiles = cell(nTasks,1);
+        correctedVols = cell(nTasks,1);
         for ii = 1:nTasks
             tLabel = CFG.TASK_LABELS{ii};
             correctedBold = fullfile(funcDir, sprintf('%s_%s_task-%s_bold_dc.nii', SUB, SES, tLabel));
-            correctedBold = run_fsl_applytopup(taskBoldFiles{ii}, topupPrefix, correctedBold, 1, CFG);
-            correctedBoldFiles{ii} = correctedBold;
+            correctedBold = run_fsl_applytopup(taskBoldFiles{ii}, topupPrefix, topupAcqFile, correctedBold, 1, CFG);
             fprintf('Corrected BOLD (task-%s): %s\n', tLabel, correctedBold);
-        end
-
-        % Re-expand corrected 4D files for SPM realign
-        correctedVols = cell(nTasks,1);
-        for ii = 1:nTasks
-            correctedVols{ii} = expand_4d(correctedBoldFiles{ii});
+            correctedVols{ii} = expand_4d(correctedBold);
         end
 
         % Realign only (distortion already corrected by applytopup)
         run_realign_only_multi(correctedVols, CFG);
 
-    elseif strcmp(CFG.TOPUP_APPLY_METHOD, 'vdm')
-        % Step 2b: Convert topup field to SPM VDM, then Realign&Unwarp
-        fprintf('\n--- Converting topup fieldmap to SPM VDM ---\n');
-        for ii = 1:nTasks
-            tLabel = CFG.TASK_LABELS{ii};
-            epiRef = taskVols{ii}{1};
-            vdm_out = convert_topup_to_vdm(topupPrefix, epiRef, funcDir, CFG, ii);
-            taskVDM{ii} = vdm_out;
-            fprintf('VDM from topup (task-%s): %s\n', tLabel, vdm_out);
-        end
+    elseif needVDM
         run_realign_unwarp_multi(taskVols, taskVDM, CFG);
+
     else
-        error('Unknown TOPUP_APPLY_METHOD: %s (must be applytopup or vdm)', CFG.TOPUP_APPLY_METHOD);
+        % realign_only mode
+        run_realign_only_multi(taskVols, CFG);
     end
 
-else
-    % realign_only mode
-    run_realign_only_multi(taskVols, CFG);
+    % Per-task means -> session mean (the coregistration reference)
+    sessionMean = resolve_session_mean(funcDir, CFG, true);
+    haveSessionMean = true;
 end
 
-% --------- Collect mean images for each task after processing ----------
-% SPM Realign&Unwarp writes "meanu*" while Realign-only writes "mean*".
-% Try task-specific match first, then broad fallback.
-for ii = 1:nTasks
-    tLabel = CFG.TASK_LABELS{ii};
-    escLabel = regexptranslate('escape', tLabel);
-    % Try meanu* first (Realign&Unwarp), then mean* (Realign-only)
-    m = newest_match(funcDir, ['^meanu.*task-' escLabel '.*\.nii$']);
-    if isempty(m)
-        m = newest_match(funcDir, ['^mean.*task-' escLabel '.*\.nii$']);
-    end
-    if isempty(m)
-        % Broad fallback: any mean* matching this task
-        m = newest_match(funcDir, ['^mean.*' escLabel '.*\.nii$']);
-    end
-    if ~isempty(m)
-        meanu_imgs{end+1,1} = m; %#ok<AGROW>
-        fprintf('Found mean image (task-%s): %s\n', tLabel, m);
+% =====================================================================
+%  STAGE coreg — T2w -> session mean, reslice ROI masks into EPI space
+% =====================================================================
+if STAGES.coreg
+    if ~CFG.DO_COREG_ROIS
+        fprintf('\n=== STAGE coreg: skipped (DO_COREG_ROIS=0) ===\n');
     else
-        warning('Could not find mean image for task-%s in %s', tLabel, funcDir);
+        if ~haveSessionMean
+            sessionMean = resolve_session_mean(funcDir, CFG, false);
+        end
+        if ~isempty(sessionMean) && (hasRoiL || hasRoiR)
+            fprintf('\n=== STAGE coreg: T2w -> %s ===\n', sessionMean);
+            roiList = {};
+            if hasRoiL, roiList{end+1} = roiL; end %#ok<AGROW>
+            if hasRoiR, roiList{end+1} = roiR; end %#ok<AGROW>
+            coreg_reslice_rois(sessionMean, t2w, roiList, CFG);
+        else
+            fprintf('\n=== STAGE coreg: skipped (missing session mean or ROIs) ===\n');
+        end
     end
 end
 
-% SPM Realign-only produces a single mean from the first session, not one
-% per task.  Deduplicate so the same file isn't counted twice.
-meanu_imgs = unique(meanu_imgs);
-
-% --------- Make session mean from per-task means ----------
-sessionMean = '';
-
-if CFG.DO_SESSION_MEAN && numel(meanu_imgs) >= 2
-    % Multiple per-task means: average them into a session mean
-    sessionMean = fullfile(funcDir, CFG.SESSION_MEAN_NAME);
-    make_session_mean(meanu_imgs, sessionMean);
-elseif ~isempty(meanu_imgs)
-    % Only one mean available (e.g. Realign-only produces a single mean):
-    % use it directly as the session mean / coreg reference.
-    sessionMean = meanu_imgs{1};
-    fprintf('\nUsing single mean as coreg ref: %s\n', sessionMean);
-else
-    % No mean at all — try broad fallback
-    sessionMean = newest_match(funcDir, '^mean.*\.nii$');
-    if isempty(sessionMean)
-        warning('No mean image found in %s. Skipping coreg.', funcDir);
+% =====================================================================
+%  STAGE smooth — Gaussian smoothing of the preprocessed BOLD files
+% =====================================================================
+if STAGES.smooth
+    if CFG.SMOOTH_FWHM > 0
+        fprintf('\n=== STAGE smooth: FWHM = %g mm ===\n', CFG.SMOOTH_FWHM);
+        smooth_bold_files(funcDir, CFG);
     else
-        fprintf('\nUsing fallback mean as coreg ref: %s\n', sessionMean);
+        fprintf('\n=== STAGE smooth: skipped (SMOOTH_FWHM = 0) ===\n');
     end
 end
 
-% --------- Coreg + reslice ROIs into EPI space ----------
-if CFG.DO_COREG_ROIS && ~isempty(sessionMean) && (hasRoiL || hasRoiR)
-    fprintf('\nCoreg+reslice ROIs into EPI space using session mean...\n');
-    roiList = {};
-    if hasRoiL, roiList{end+1} = roiL; end %#ok<AGROW>
-    if hasRoiR, roiList{end+1} = roiR; end %#ok<AGROW>
-    coreg_reslice_rois(sessionMean, t2w, roiList, CFG);
-else
-    fprintf('\nSkipping ROI coreg (missing session mean or ROIs).\n');
-end
-
-
-% --------- Optional spatial smoothing ----------
-if CFG.SMOOTH_FWHM > 0
-    fprintf('\nSmoothing preprocessed BOLD files (FWHM = %g mm)...\n', CFG.SMOOTH_FWHM);
-    smooth_bold_files(funcDir, CFG);
-else
-    fprintf('\nSmoothing: skipped (SMOOTH_FWHM = 0).\n');
-end
 % --------- Save preprocessing provenance log ----------
-save_provenance_log(funcDir, SUB, SES, CFG, cfgFile, taskBoldFiles);
+save_provenance_log(funcDir, SUB, SES, CFG, cfgFile, taskBoldFiles, STAGES.list);
 
-fprintf('\nDONE: %s / %s\n\n', SUB, SES);
+fprintf('\nDONE: %s / %s  [stages: %s]\n\n', SUB, SES, strjoin(STAGES.list, ','));
 end
 
 % ============================== HELPERS ==============================
@@ -1098,17 +1171,7 @@ run_shell(cmd);
 
 % --- Step 3: Create acqparams.txt ---
 acqparamsFile = fullfile(funcDir, 'topup_acqparams.txt');
-fid = fopen(acqparamsFile, 'w');
-assert(fid > 0, 'Cannot create acqparams file: %s', acqparamsFile);
-
-% Convert PE direction strings to acqparams vectors
-fwdVec = pe_dir_to_vector(CFG.TOPUP_PE_DIR_BOLD);
-revVec = pe_dir_to_vector(CFG.TOPUP_PE_DIR_REVERSE);
-readout = CFG.TOPUP_READOUT_SEC;
-
-fprintf(fid, '%d %d %d %.6f\n', fwdVec(1), fwdVec(2), fwdVec(3), readout);
-fprintf(fid, '%d %d %d %.6f\n', revVec(1), revVec(2), revVec(3), readout);
-fclose(fid);
+write_acqparams(acqparamsFile, CFG);
 fprintf('  Acqparams file: %s\n', acqparamsFile);
 
 % --- Step 4: Run FSL topup ---
@@ -1133,15 +1196,16 @@ if isfile(mergedFile), delete(mergedFile); end
 
 end
 
-function outputFile = run_fsl_applytopup(boldFile, topupPrefix, outputFile, imainIndex, CFG)
+function outputFile = run_fsl_applytopup(boldFile, topupPrefix, acqparamsFile, outputFile, imainIndex, CFG)
 % RUN_FSL_APPLYTOPUP  Apply topup distortion correction to a 4D BOLD file.
 %
 % Inputs:
-%   boldFile    - Input 4D BOLD NIfTI
-%   topupPrefix - Prefix from run_fsl_topup (contains fieldcoefs, movpar)
-%   outputFile  - Desired output path (must end in .nii)
-%   imainIndex  - Index into acqparams.txt for this image (1 = forward PE)
-%   CFG         - Config struct with TOPUP_INTERP
+%   boldFile      - Input 4D BOLD NIfTI
+%   topupPrefix   - Prefix from run_fsl_topup (contains fieldcoefs, movpar)
+%   acqparamsFile - acqparams.txt topup was run with (see resolve_acqparams)
+%   outputFile    - Desired output path (must end in .nii)
+%   imainIndex    - Index into acqparams.txt for this image (1 = forward PE)
+%   CFG           - Config struct with TOPUP_INTERP
 %
 % Returns:
 %   outputFile  - Actual path to the corrected file (.nii, decompressed)
@@ -1153,7 +1217,7 @@ function outputFile = run_fsl_applytopup(boldFile, topupPrefix, outputFile, imai
 %     The alternative --method=lsr (least-squares) requires BOTH forward and
 %     reverse PE images passed together, which doesn't apply here.
 
-acqparamsFile = fullfile(fileparts(topupPrefix), 'topup_acqparams.txt');
+assert(isfile(acqparamsFile), 'acqparams file not found: %s', acqparamsFile);
 
 % FSL --out expects a basename without extension
 outBase = regexprep(outputFile, '\.nii(\.gz)?$', '');
@@ -1187,7 +1251,11 @@ function vdm_out = convert_topup_to_vdm(topupPrefix, epiRef, funcDir, CFG, taskN
 % The VDM is then written as a NIfTI in funcDir for use with SPM Realign&Unwarp.
 
 fieldFile = sprintf('%s_field.nii.gz', topupPrefix);
-assert(isfile(fieldFile), 'Topup field not found: %s', fieldFile);
+if ~isfile(fieldFile)
+    % Topup output made outside this pipeline may not be compressed
+    fieldFile = sprintf('%s_field.nii', topupPrefix);
+end
+assert(isfile(fieldFile), 'Topup field not found: %s_field.nii[.gz]', topupPrefix);
 
 % Convert to .nii for SPM (FSL defaults to .nii.gz)
 fieldNii = fullfile(funcDir, sprintf('topup_field_task-%d.nii', taskN));
@@ -1663,12 +1731,16 @@ end
 
 % ===================== PROVENANCE LOG =====================
 
-function save_provenance_log(funcDir, SUB, SES, CFG, cfgFile, taskBoldFiles)
+function save_provenance_log(funcDir, SUB, SES, CFG, cfgFile, taskBoldFiles, stagesRun)
 % SAVE_PROVENANCE_LOG  Write a JSON log of all preprocessing settings used.
 %
-% Saved as preproc_provenance.json in the func/ directory.
-% Contains: preprocessing mode, all key parameters, timestamps,
-% software versions, and input files.
+% Saved as preproc_provenance.json in the func/ directory. Contains the
+% preprocessing mode, the stages this run executed, all key parameters,
+% timestamps, software versions, and input files.
+%
+% The JSON always describes the most recent run. Because stages can be run
+% separately, a running history of (timestamp, mode, stages) is also appended
+% to preproc_stages.log next to it.
 
 logFile = fullfile(funcDir, 'preproc_provenance.json');
 fprintf('\nSaving provenance log: %s\n', logFile);
@@ -1681,6 +1753,7 @@ prov.subject = SUB;
 prov.session = SES;
 prov.config_file = cfgFile;
 prov.preproc_mode = CFG.PREPROC_MODE;
+prov.stages_run = stagesRun;
 
 % --- Software versions ---
 prov.software.spm_dir = CFG.SPM_DIR;
@@ -1829,5 +1902,267 @@ if fid > 0
     fprintf('  Provenance log saved.\n');
 else
     warning('Could not write provenance log: %s', logFile);
+end
+
+% --- Append this run to the stage history ---
+stageLog = fullfile(funcDir, 'preproc_stages.log');
+fid = fopen(stageLog, 'a');
+if fid > 0
+    fprintf(fid, '%s\t%s\t%s\t%s\n', prov.created, CFG.PREPROC_MODE, ...
+            strjoin(stagesRun, ','), cfgFile);
+    fclose(fid);
+end
+end
+
+% ===================== STAGE HELPERS =====================
+
+function S = resolve_stages(spec)
+% RESOLVE_STAGES  Turn a stage specification into a struct of flags.
+%
+% spec may be:
+%   ''  or  'all'                     -> every stage
+%   'topup,vdm,realign,coreg,smooth'  -> an explicit comma-separated list
+%   {'realign','coreg'}               -> the same as a cell array
+%   'fieldmap'                        -> shorthand for topup,vdm
+%   'post_fieldmap'                   -> shorthand for realign,coreg,smooth
+%
+% Returns a struct with one logical field per stage, plus:
+%   .list     stage names to run, in canonical order
+%   .skipped  stage names that will not run, in canonical order
+
+ALL = {'topup','vdm','realign','coreg','smooth'};
+
+if isempty(spec)
+    spec = 'all';
+end
+
+if isstring(spec) && ~isscalar(spec)
+    spec = cellstr(spec);   % a string array behaves like a cellstr here
+end
+
+if ischar(spec) || isstring(spec)
+    parts = strsplit(char(spec), ',');
+elseif iscell(spec)
+    parts = spec;
+else
+    error('run_spm_preproc:BadStageSpec', ...
+          'Stage specification must be a string or cell array of strings.');
+end
+
+parts = strtrim(lower(cellfun(@char, parts, 'UniformOutput', false)));
+parts = parts(~cellfun(@isempty, parts));
+
+sel = {};
+for i = 1:numel(parts)
+    p = parts{i};
+    switch p
+        case 'all'
+            sel = [sel, ALL]; %#ok<AGROW>
+        case {'fieldmap','fieldmaps','fmap'}
+            sel = [sel, {'topup','vdm'}]; %#ok<AGROW>
+        case {'post_fieldmap','postfieldmap','post-fieldmap'}
+            sel = [sel, {'realign','coreg','smooth'}]; %#ok<AGROW>
+        case {'unwarp','realign_unwarp'}
+            sel = [sel, {'realign'}]; %#ok<AGROW>
+        otherwise
+            if ~ismember(p, ALL)
+                error('run_spm_preproc:UnknownStage', [ ...
+                      'Unknown preprocessing stage: "%s"\n' ...
+                      'Valid stages: %s\n' ...
+                      'Shorthands:   all, fieldmap (topup,vdm), post_fieldmap (realign,coreg,smooth)'], ...
+                      p, strjoin(ALL, ', '));
+            end
+            sel{end+1} = p; %#ok<AGROW>
+    end
+end
+
+assert(~isempty(sel), 'run_spm_preproc:NoStages', 'No preprocessing stages selected.');
+
+S = struct();
+for i = 1:numel(ALL)
+    S.(ALL{i}) = ismember(ALL{i}, sel);
+end
+S.list    = ALL(ismember(ALL, sel));      % canonical order
+S.skipped = ALL(~ismember(ALL, sel));
+end
+
+function topupPrefix = resolve_topup_prefix(funcDir, SUB, SES, CFG, useExisting)
+% RESOLVE_TOPUP_PREFIX  Where the FSL topup output for this session lives.
+%
+% The topup stage always writes into func/ as "topup_results". When that stage
+% is skipped, TOPUP_EXISTING_PREFIX (if set) points at topup output produced
+% outside this pipeline; {SUB} and {SES} in it are substituted. A full filename
+% such as ".../mytopup_fieldcoef.nii.gz" is accepted and reduced to its prefix.
+
+topupPrefix = fullfile(funcDir, 'topup_results');
+
+if ~useExisting || isempty(CFG.TOPUP_EXISTING_PREFIX)
+    return;
+end
+
+p = CFG.TOPUP_EXISTING_PREFIX;
+p = strrep(p, '{SUB}', SUB);
+p = strrep(p, '{SES}', SES);
+p = regexprep(p, '_(fieldcoef|field|corrected)\.nii(\.gz)?$', '');
+p = regexprep(p, '_movpar\.txt$', '');
+topupPrefix = p;
+end
+
+function assert_topup_outputs(topupPrefix, CFG, STAGES)
+% ASSERT_TOPUP_OUTPUTS  Check that pre-computed topup output is usable.
+%
+% Only the files the selected stages actually read are required: the field map
+% (<prefix>_field) feeds the vdm stage, the spline coefficients and movement
+% parameters (<prefix>_fieldcoef, <prefix>_movpar) feed applytopup.
+
+groups = {};
+if STAGES.vdm && strcmp(CFG.TOPUP_APPLY_METHOD, 'vdm')
+    groups{end+1} = {[topupPrefix '_field.nii.gz'], [topupPrefix '_field.nii']};
+end
+if STAGES.realign && strcmp(CFG.TOPUP_APPLY_METHOD, 'applytopup')
+    groups{end+1} = {[topupPrefix '_fieldcoef.nii.gz'], [topupPrefix '_fieldcoef.nii']};
+    groups{end+1} = {[topupPrefix '_movpar.txt']};
+end
+
+if isempty(groups)
+    fprintf('  No topup output needed by the selected stages.\n');
+    return;
+end
+
+missing = {};
+for i = 1:numel(groups)
+    found = '';
+    for k = 1:numel(groups{i})
+        if isfile(groups{i}{k})
+            found = groups{i}{k};
+            break;
+        end
+    end
+    if isempty(found)
+        missing{end+1} = strjoin(groups{i}, ' or '); %#ok<AGROW>
+    else
+        fprintf('  Found: %s\n', found);
+    end
+end
+
+assert(isempty(missing), [ ...
+    'Pre-computed FSL topup output is missing:\n  %s\n\n' ...
+    'The "topup" stage was not selected, so these files have to exist already.\n' ...
+    'Either add "topup" to the stage list, copy your topup output next to\n' ...
+    '  %s\n' ...
+    'or set TOPUP_EXISTING_PREFIX in pipeline_config.cfg to point at it.'], ...
+    strjoin(missing, sprintf('\n  ')), topupPrefix);
+end
+
+function write_acqparams(acqFile, CFG)
+% WRITE_ACQPARAMS  Write the two-line FSL acqparams file from the config.
+% Line 1 = forward (BOLD) phase-encode direction, line 2 = reverse.
+
+fid = fopen(acqFile, 'w');
+assert(fid > 0, 'Cannot create acqparams file: %s', acqFile);
+
+fwdVec = pe_dir_to_vector(CFG.TOPUP_PE_DIR_BOLD);
+revVec = pe_dir_to_vector(CFG.TOPUP_PE_DIR_REVERSE);
+readout = CFG.TOPUP_READOUT_SEC;
+
+fprintf(fid, '%d %d %d %.6f\n', fwdVec(1), fwdVec(2), fwdVec(3), readout);
+fprintf(fid, '%d %d %d %.6f\n', revVec(1), revVec(2), revVec(3), readout);
+fclose(fid);
+end
+
+function acqFile = resolve_acqparams(topupPrefix, funcDir, CFG)
+% RESOLVE_ACQPARAMS  Locate the acqparams file applytopup needs.
+%
+% Prefers the one sitting next to the topup output, since that is what topup
+% itself was run with. If topup output produced elsewhere came without one, a
+% matching file is written into func/ from TOPUP_PE_DIR_* and TOPUP_READOUT_SEC.
+
+acqFile = fullfile(fileparts(topupPrefix), 'topup_acqparams.txt');
+if isfile(acqFile)
+    return;
+end
+
+acqFile = fullfile(funcDir, 'topup_acqparams.txt');
+if ~isfile(acqFile)
+    fprintf('  No acqparams file next to the topup output — writing %s from config.\n', acqFile);
+    write_acqparams(acqFile, CFG);
+end
+end
+
+function vdmPath = existing_task_vdm(funcDir, taskN)
+% EXISTING_TASK_VDM  Path to a voxel displacement map already on disk, or ''.
+% Matches what calc_vdm_for_run_to_func / convert_topup_to_vdm write.
+
+vdmPath = '';
+candidates = { fullfile(funcDir, sprintf('vdm_task-%d.nii', taskN)), ...
+               fullfile(funcDir, sprintf('vdm_task-%d.img', taskN)) };
+for k = 1:numel(candidates)
+    if isfile(candidates{k})
+        vdmPath = candidates{k};
+        return;
+    end
+end
+end
+
+function sessionMean = resolve_session_mean(funcDir, CFG, rebuild)
+% RESOLVE_SESSION_MEAN  Find (or build) the mean EPI used as coreg reference.
+%
+%   rebuild = true   always recompute from the per-task means; used right after
+%                    realignment, when those means have just been rewritten
+%   rebuild = false  reuse an existing session mean if there is one; used when
+%                    the coreg stage runs on its own
+
+sessionMeanFile = fullfile(funcDir, CFG.SESSION_MEAN_NAME);
+
+if ~rebuild && isfile(sessionMeanFile)
+    sessionMean = sessionMeanFile;
+    fprintf('\nUsing existing session mean: %s\n', sessionMean);
+    return;
+end
+
+% --------- Collect the mean image written for each task ----------
+% SPM Realign&Unwarp writes "meanu*" while Realign-only writes "mean*".
+% Try task-specific match first, then broad fallback.
+meanu_imgs = cell(0,1);
+for ii = 1:numel(CFG.TASK_LABELS)
+    tLabel = CFG.TASK_LABELS{ii};
+    escLabel = regexptranslate('escape', tLabel);
+    m = newest_match(funcDir, ['^meanu.*task-' escLabel '.*\.nii$']);
+    if isempty(m)
+        m = newest_match(funcDir, ['^mean.*task-' escLabel '.*\.nii$']);
+    end
+    if isempty(m)
+        % Broad fallback: any mean* matching this task
+        m = newest_match(funcDir, ['^mean.*' escLabel '.*\.nii$']);
+    end
+    if ~isempty(m)
+        meanu_imgs{end+1,1} = m; %#ok<AGROW>
+        fprintf('Found mean image (task-%s): %s\n', tLabel, m);
+    else
+        warning('Could not find mean image for task-%s in %s', tLabel, funcDir);
+    end
+end
+
+% SPM Realign-only produces a single mean from the first session, not one
+% per task.  Deduplicate so the same file isn't counted twice.
+meanu_imgs = unique(meanu_imgs);
+
+if CFG.DO_SESSION_MEAN && numel(meanu_imgs) >= 2
+    % Multiple per-task means: average them into a session mean
+    sessionMean = sessionMeanFile;
+    make_session_mean(meanu_imgs, sessionMean);
+elseif ~isempty(meanu_imgs)
+    % Only one mean available (e.g. Realign-only produces a single mean):
+    % use it directly as the session mean / coreg reference.
+    sessionMean = meanu_imgs{1};
+    fprintf('\nUsing single mean as coreg ref: %s\n', sessionMean);
+else
+    % No per-task mean at all — try broad fallback
+    sessionMean = newest_match(funcDir, '^mean.*\.nii$');
+    if isempty(sessionMean)
+        warning('No mean image found in %s. Run the "realign" stage first.', funcDir);
+    else
+        fprintf('\nUsing fallback mean as coreg ref: %s\n', sessionMean);
+    end
 end
 end

@@ -45,7 +45,8 @@ All scripts auto-detect their directory and read configuration automatically.
 | `filter_subses_list.sh`       | Shell  | Filters subject/session list by include/exclude rules and ROI availability     |
 | `validate_config.sh`          | Shell  | Validates all config settings before running analysis                          |
 | `spm_preproc_array.sbatch`    | SLURM  | HPC array job script for SPM preprocessing (one per subject-session)           |
-| `run_spm_preproc.m`           | MATLAB | Performs VDM calc, realign/unwarp (or realign-only), coregistration, reslicing |
+| `submit_preproc.sh`           | Shell  | Submits preprocessing, or single stages of it, without the interactive menu    |
+| `run_spm_preproc.m`           | MATLAB | Performs VDM calc, realign/unwarp (or realign-only), coregistration, reslicing; runs as five separately callable stages |
 | `read_pipeline_config.m`      | MATLAB | Config parser; reads and validates settings in MATLAB                          |
 | `run_prep.sh`                 | Shell  | Wrapper for data preparation for GridCAT                                       |
 | `prepare_gridcat_directory.m` | MATLAB | Splits 4D → 3D, copies motion regressors, creates bilateral ROIs               |
@@ -157,6 +158,7 @@ The config file contains 7 main sections:
 - **BIDS_ROOT** — Absolute path to BIDS dataset root
 - **OUTPUT_ROOT** — Where to write derived data
 - **PREPROC_MODE** — Choose `realign_unwarp`, `topup`, or `realign_only`
+- **PREPROC_STAGES** — Which parts of the preprocessing to run: `all` (default), or a comma-separated subset of `topup,vdm,realign,coreg,smooth`. See [Running preprocessing in stages](#running-preprocessing-in-stages)
 - **TASKS** — Comma-separated task numbers to process (e.g., `1,2,3` matches task-1, task-2, task-3)
 - **ROI_MODE** — Which ROI masks to use (`both`, `bilat_only`, or `lr_only`)
 - **FAIL_ON_MISSING** — If `true`, pipeline stops on any missing file; if `false`, lenient processing
@@ -308,7 +310,18 @@ sbatch --array=1-N spm_preproc_array.sbatch
 
 (Where `N` is the number of lines in `subses_list.txt`)
 
-Or use the interactive menu in `run_pipeline.sh` to submit.
+Or use the interactive menu in `run_pipeline.sh` to submit — option `2` runs the
+whole thing, option `2S` lets you pick individual stages.
+
+To submit without the menu, `submit_preproc.sh` fills in the SLURM resource flags
+from the config for you:
+
+```bash
+bash submit_preproc.sh
+```
+
+See [Running preprocessing in stages](#running-preprocessing-in-stages) for how to
+run only part of the preprocessing.
 
 **What it does:**
 
@@ -394,6 +407,98 @@ All modes produce `rp_*.txt` files with 6 columns: **3 translations (mm) and 3 r
 - `PREPROC_MEM_PER_CPU` — Memory per CPU (default: 12G)
 - `PREPROC_TIME` — Wall-clock limit per job (default: 10:00:00)
 - `SLURM_PARTITION` — HPC partition name (default: compute)
+
+---
+
+#### Running preprocessing in stages
+
+Step 2 is not one indivisible block. It runs as five stages, in this order:
+
+| Stage | What it does | What it writes | No-op when |
+|-------|--------------|----------------|------------|
+| `topup` | FSL topup estimates the distortion field from the forward/reverse-PE pair | `func/topup_results_*`, `func/topup_acqparams.txt` | `PREPROC_MODE` is not `topup` |
+| `vdm` | Builds one voxel displacement map per task, matched to that task's first EPI volume | `func/vdm_task-<N>.nii` | mode is `realign_only`, or `topup`+`applytopup` |
+| `realign` | Applies the distortion correction and estimates motion (Realign & Unwarp, or applytopup + Realign, or Realign alone) | `func/u*_bold.nii`, `func/rp_*.txt`, per-task means, `func/meanu_session.nii` | never |
+| `coreg` | Coregisters T2w to the session mean and reslices the ROI masks into EPI space | `anat/r*_mask.nii` | `DO_COREG_ROIS=0` |
+| `smooth` | Gaussian smoothing of the preprocessed BOLD | `func/su*_bold.nii` | `SMOOTH_FWHM=0` |
+
+Each stage reads its inputs from disk rather than from the stage before it, so any
+contiguous piece of the chain can be run on its own. Set the default in the config:
+
+```bash
+PREPROC_STAGES=all                        # the complete preprocessing (default)
+PREPROC_STAGES=fieldmap                   # shorthand for topup,vdm — then stop
+PREPROC_STAGES=post_fieldmap              # shorthand for realign,coreg,smooth
+PREPROC_STAGES=realign,coreg,smooth       # resume from ready-made VDMs
+PREPROC_STAGES=smooth                     # re-smooth with a different SMOOTH_FWHM
+```
+
+…or override it per submission, without touching the config:
+
+```bash
+bash submit_preproc.sh --stages realign,coreg,smooth
+```
+
+…or pick the stages interactively with option `2S` in `run_pipeline.sh`.
+
+Partial runs get a job name that names the stages (`spm_realign_coreg_smooth`), so
+they are easy to tell apart from a full array in `squeue`. Every run appends a line
+to `func/preproc_stages.log` recording the timestamp, mode and stages, and rewrites
+`func/preproc_provenance.json` with a `stages_run` field.
+
+**Resuming from fieldmaps you made yourself**
+
+If you ran FSL topup outside this pipeline and uploaded the results to the cluster,
+point the config at them and skip the `topup` stage:
+
+```bash
+# in pipeline_config.cfg
+PREPROC_MODE=topup
+TOPUP_APPLY_METHOD=vdm
+TOPUP_EXISTING_PREFIX=/path/to/topup/{SUB}/{SES}/topup_results
+```
+
+`TOPUP_EXISTING_PREFIX` is the topup output **prefix** — the path without the
+`_fieldcoef.nii.gz` / `_movpar.txt` / `_field.nii.gz` suffix. `{SUB}` and `{SES}`
+are replaced per session. Leave it empty to look in the session's own `func/`
+directory (`func/topup_results_*`), which is where the pipeline's own `topup` stage
+writes. Then run:
+
+```bash
+bash submit_preproc.sh --stages vdm,realign,coreg,smooth
+```
+
+The `vdm` stage reads `<prefix>_field.nii[.gz]`; `applytopup` reads
+`<prefix>_fieldcoef.nii[.gz]` and `<prefix>_movpar.txt`. Only the files the selected
+stages actually need are required, and the job fails immediately with the expected
+paths if one is missing. If the topup output came without an `acqparams.txt`, a
+matching one is written into `func/` from `TOPUP_PE_DIR_BOLD`, `TOPUP_PE_DIR_REVERSE`
+and `TOPUP_READOUT_SEC` — so those three settings must still be correct.
+
+Alternatively, if you already have voxel displacement maps, drop them into each
+session's `func/` as `vdm_task-1.nii`, `vdm_task-2.nii`, … (numbered in the order
+your `TASKS` are listed) and run `--stages realign,coreg,smooth`.
+
+**Running one session in the foreground**
+
+Useful for debugging a single subject without queueing a job:
+
+```bash
+bash submit_preproc.sh --sub sub-01s13 --ses ses-01 --stages smooth --local
+```
+
+`--dry-run` prints the command that would be submitted or run, and stops.
+
+**Caveats**
+
+- Stages must be run in order the first time; a stage will fail with a clear error
+  if what it needs is not on disk yet.
+- Re-running `realign` overwrites `u*` and the mean images, so `coreg` and `smooth`
+  should be re-run after it.
+- `coreg` on its own reuses an existing `func/meanu_session.nii`; it only rebuilds
+  the session mean if that file is missing.
+- Skipped stages are not validated: if you skip `topup`, the reverse-PE EPI is never
+  looked for, and its BIDS JSON is not cross-checked against the config.
 
 ---
 
@@ -580,17 +685,18 @@ Instead of running steps individually, use the interactive menu:
 ```
 GridCAT Pipeline - Main Menu
 ============================
-0) Discover subjects/sessions (step0_make_subses_list.sh)
-F) Filter subject/session list (filter_subses_list.sh)
-1) Validate configuration (validate_config.sh)
-2) Run SPM preprocessing (sbatch spm_preproc_array.sbatch)
-3) Prepare for GridCAT (run_prep.sh)
-4) Run GridCAT analysis (run_gridcat.sh)
-5) Collect results (collect_gridcat_output.R)
-A) Run all steps (0-5 in sequence)
-Q) Quit
+0)  Discover subjects/sessions (step0_make_subses_list.sh)
+F)  Filter subject/session list (filter_subses_list.sh)
+1)  Validate configuration (validate_config.sh)
+2)  Run SPM preprocessing (sbatch spm_preproc_array.sbatch)
+2S) Run SPM preprocessing — pick stages (topup/vdm/realign/coreg/smooth)
+3)  Prepare for GridCAT (run_prep.sh)
+4)  Run GridCAT analysis (run_gridcat.sh)
+5)  Collect results (collect_gridcat_output.R)
+A)  Run all steps (0-5 in sequence)
+Q)  Quit
 
-Select [0-5/F/A/Q]:
+Select [0-5/2S/F/A/Q]:
 ```
 
 **Recommended workflow:**
@@ -598,7 +704,9 @@ Select [0-5/F/A/Q]:
 1. Run `0` (discover) once at setup
 2. Run `F` (filter) if you need to select specific subjects/sessions
 3. Run `1` (validate) before first full run and after config changes
-4. Run `2` (preprocessing) via HPC; wait for completion
+4. Run `2` (preprocessing) via HPC; wait for completion — or `2S` to run only
+   some of the preprocessing stages, e.g. when resuming from fieldmaps you
+   produced yourself
 5. Run `3` → `4` → `5` in sequence
 6. Or run `A` to automate all steps (filter runs automatically after step 0)
 
