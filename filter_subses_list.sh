@@ -12,7 +12,8 @@
 #    INCLUDE_SESSIONS  — keep only these sessions (whitelist)
 #    EXCLUDE_SUBJECTS  — remove these subjects (blacklist)
 #    EXCLUDE_SESSIONS  — remove these sessions (blacklist)
-#    REQUIRE_ROI       — remove pairs without ROI masks in anat/
+#    REQUIRE_ROI       — remove pairs with no ROI mask, looking in the ROI
+#                        derivatives dataset first and the raw anat/ second
 #
 #  Usage:
 #    bash filter_subses_list.sh
@@ -35,6 +36,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
 fi
 
 source "$CONFIG_FILE"
+source "${SCRIPT_DIR}/bids_common.sh"
 
 # ============================================================================
 # VALIDATE INPUTS
@@ -152,26 +154,30 @@ if [[ "${REQUIRE_ROI:-false}" == "true" ]]; then
     if [[ -z "$ROI_PAT_L" && -z "$ROI_PAT_R" ]]; then
         echo "  WARNING: REQUIRE_ROI=true but no ROI_PATTERN_LEFT/RIGHT set. Skipping."
     else
+        ROI_DERIV="$(deriv_rois 2>/dev/null || echo '')"
+        [[ -n "$ROI_DERIV" ]] && echo "  Looking in: ${ROI_DERIV}/<sub>/<ses>/anat"
+        echo "          and ${BIDS_ROOT}/<sub>/<ses>/anat"
+
         > "${TEMP_LIST}.tmp"
         removed_roi=0
         while read -r sub ses rest; do
-            anat_dir="${BIDS_ROOT}/${sub}/${ses}/anat"
             found=false
 
-            if [[ -d "$anat_dir" ]]; then
-                # Check for left ROI
-                if [[ -n "$ROI_PAT_L" ]]; then
-                    if ls "$anat_dir"/*"$ROI_PAT_L"* &>/dev/null; then
-                        found=true
-                    fi
+            # move_rois.sh imports masks into the derivatives; older datasets
+            # may still have them beside the raw anatomy, so check both.
+            for anat_dir in ${ROI_DERIV:+"$(deriv_session "$ROI_DERIV" "$sub" "$ses" anat)"} \
+                            "${BIDS_ROOT}/${sub}/${ses}/anat"; do
+                [[ -d "$anat_dir" ]] || continue
+
+                if [[ -n "$ROI_PAT_L" ]] && ls "$anat_dir"/*"$ROI_PAT_L"* &>/dev/null; then
+                    found=true
                 fi
-                # Check for right ROI
-                if [[ -n "$ROI_PAT_R" ]] && [[ "$found" == "false" ]]; then
-                    if ls "$anat_dir"/*"$ROI_PAT_R"* &>/dev/null; then
-                        found=true
-                    fi
+                if [[ -n "$ROI_PAT_R" ]] && [[ "$found" == "false" ]] && \
+                   ls "$anat_dir"/*"$ROI_PAT_R"* &>/dev/null; then
+                    found=true
                 fi
-            fi
+                [[ "$found" == "true" ]] && break
+            done
 
             if [[ "$found" == "true" ]]; then
                 echo "$sub $ses" >> "${TEMP_LIST}.tmp"

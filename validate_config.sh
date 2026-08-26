@@ -112,6 +112,12 @@ if ! source "$CONFIG_FILE" 2>/dev/null; then
     exit 1
 fi
 
+# Shared derivative-path helpers
+if [[ -f "${SCRIPT_DIR}/bids_common.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "${SCRIPT_DIR}/bids_common.sh"
+fi
+
 print_header "1. CONFIGURATION FILE"
 
 # Check if config file is readable
@@ -174,6 +180,78 @@ else
     else
         print_check_fail "OUTPUT_ROOT parent is not writable or doesn't exist"
         print_detail "$OUTPUT_PARENT"
+    fi
+fi
+
+# ----------------------------------------------------------------------
+# Derivatives
+# ----------------------------------------------------------------------
+if declare -f deriv_root >/dev/null 2>&1; then
+    if DERIV_BASE="$(deriv_root)"; then
+        print_check_pass "Derivatives root resolves"
+        print_detail "$DERIV_BASE"
+        print_detail "preprocessing: $(deriv_preproc)"
+        print_detail "ROI masks:     $(deriv_rois)"
+        print_detail "fieldmaps:     $(deriv_fieldmaps)"
+
+        # The point of the derivatives is that BIDS_ROOT stays raw
+        if [[ -n "${BIDS_ROOT:-}" && "${DERIV_BASE}" == "${BIDS_ROOT%/}" ]]; then
+            print_check_fail "DERIV_ROOT is BIDS_ROOT itself — the pipeline would write into the raw data"
+        fi
+
+        DERIV_PARENT="$DERIV_BASE"
+        while [[ -n "$DERIV_PARENT" && ! -d "$DERIV_PARENT" ]]; do
+            DERIV_PARENT="$(dirname "$DERIV_PARENT")"
+        done
+        if [[ -w "$DERIV_PARENT" ]]; then
+            print_check_pass "Derivatives location is writable"
+        else
+            print_check_fail "Cannot write to the derivatives location"
+            print_detail "$DERIV_PARENT is not writable"
+        fi
+    else
+        print_check_fail "Cannot resolve the derivatives root (set OUTPUT_ROOT or DERIV_ROOT)"
+    fi
+
+    case "${DERIV_RESET:-auto}" in
+        auto|always|never)
+            print_check_pass "DERIV_RESET = ${DERIV_RESET:-auto}"
+            [[ "${DERIV_RESET:-auto}" == "never" ]] && \
+                print_detail "old output is never cleared — files no longer produced will linger"
+            ;;
+        *)
+            print_check_fail "DERIV_RESET must be auto, always or never (got '${DERIV_RESET}')"
+            ;;
+    esac
+else
+    print_check_warn "bids_common.sh not found next to the scripts — derivative paths unchecked"
+fi
+
+# ----------------------------------------------------------------------
+# Leftovers from before the derivatives layout
+# ----------------------------------------------------------------------
+# Earlier versions ran SPM directly on BIDS_ROOT, so a dataset processed with
+# one of those still holds u*_bold.nii, rp_*.txt, vdm_*, topup_* and
+# decompressed twins of every .nii.gz. Nothing reads them any more, and they
+# make it impossible to tell raw data from output.
+if [[ -n "${BIDS_ROOT:-}" && -d "$BIDS_ROOT" ]]; then
+    # Every prefix is anchored on "sub-": a raw BIDS name starts with "sub-"
+    # itself, so an unanchored "su*_bold*.nii" matches raw functional data.
+    _u="${RESLICE_PREFIX:-u}"
+    _s="${SMOOTH_PREFIX:-s}"
+    LEFTOVERS=$(find "$BIDS_ROOT" -maxdepth 4 \( \
+            -name "${_u}sub-*_bold*.nii" -o -name "${_s}${_u}sub-*_bold*.nii" -o \
+            -name "rp_sub-*.txt"         -o -name "vdm_*" -o -name "vdm5_*" -o \
+            -name "topup_*"              -o -name "mean${_u}sub-*.nii" -o \
+            -name "meansub-*.nii"        -o -name "preproc_provenance.json" \
+        \) 2>/dev/null | wc -l | tr -d ' ')
+    if [[ "$LEFTOVERS" -gt 0 ]]; then
+        print_check_warn "$LEFTOVERS preprocessing file(s) still sitting inside BIDS_ROOT"
+        print_detail "left by an earlier version that wrote in place"
+        print_detail "list them:   bash clean_bids_leftovers.sh"
+        print_detail "remove them: bash clean_bids_leftovers.sh --execute"
+    else
+        print_check_pass "BIDS_ROOT holds no preprocessing output"
     fi
 fi
 
@@ -385,24 +463,53 @@ else
     print_check_warn "ROI_SOURCE_LABEL not set"
 fi
 
-# Validate run selection file
+# ---- Multi-run selection ----
 if [[ -n "${RUN_SELECTION_FILE:-}" ]]; then
     if [[ -f "$RUN_SELECTION_FILE" ]]; then
-        SEL_ROWS=$(tail -n +2 "$RUN_SELECTION_FILE" | grep -cve '^\s*$' || echo 0)
+        SEL_ROWS=$(tail -n +2 "$RUN_SELECTION_FILE" | grep -cve '^[[:space:]]*$' || echo 0)
         print_check_pass "RUN_SELECTION_FILE exists"
         print_detail "$RUN_SELECTION_FILE ($SEL_ROWS entries)"
-        # Check for unfilled entries
-        UNFILLED=$(tail -n +2 "$RUN_SELECTION_FILE" | awk -F'\t' '{if ($5 == "" || $5 ~ /^\s*$/) print}' | wc -l)
+
+        # Rows with no choice fall back to acquisition-time matching, which
+        # STRICT_RUN_MATCHING turns into an error when it cannot decide.
+        UNFILLED=$(tail -n +2 "$RUN_SELECTION_FILE" \
+                   | awk -F'\t' '{if ($5 == "" || $5 ~ /^[[:space:]]*$/) print}' | wc -l | tr -d ' ')
         if [[ "$UNFILLED" -gt 0 ]]; then
-            print_check_warn "$UNFILLED entries in run_selection.tsv have no selected_run (will use defaults)"
+            if [[ "${STRICT_RUN_MATCHING:-true}" == "true" ]]; then
+                print_check_warn "$UNFILLED row(s) have no selected_run"
+                print_detail "these are decided by acquisition time; with STRICT_RUN_MATCHING=true"
+                print_detail "the preprocessing stops on any it cannot decide"
+            else
+                print_check_warn "$UNFILLED row(s) have no selected_run (will be guessed)"
+            fi
         fi
     else
         print_check_warn "RUN_SELECTION_FILE specified but not found: $RUN_SELECTION_FILE"
         print_detail "Run: bash scan_multirun.sh to generate it"
     fi
 else
-    print_check_pass "RUN_SELECTION_FILE not set (auto-select mode for multi-run cases)"
+    print_check_pass "RUN_SELECTION_FILE not set — runs matched by acquisition time alone"
 fi
+
+# Gap that separates one visit to the scanner from the next
+if [[ -n "${RUN_MATCH_GAP_MIN:-}" ]]; then
+    if [[ "$RUN_MATCH_GAP_MIN" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+        print_check_pass "RUN_MATCH_GAP_MIN = ${RUN_MATCH_GAP_MIN} minutes"
+    else
+        print_check_fail "RUN_MATCH_GAP_MIN must be a number (got '${RUN_MATCH_GAP_MIN}')"
+    fi
+fi
+
+case "${STRICT_RUN_MATCHING:-true}" in
+    true|false)
+        print_check_pass "STRICT_RUN_MATCHING = ${STRICT_RUN_MATCHING:-true}"
+        [[ "${STRICT_RUN_MATCHING:-true}" == "false" ]] && \
+            print_detail "ambiguous multi-run cases are guessed rather than refused"
+        ;;
+    *)
+        print_check_fail "STRICT_RUN_MATCHING must be true or false (got '${STRICT_RUN_MATCHING}')"
+        ;;
+esac
 
 # ======================================================================
 # BIDS STRUCTURE

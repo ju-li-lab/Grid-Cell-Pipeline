@@ -1,14 +1,17 @@
-function prepare_gridcat_directory(BIDS_ROOT, OUTPUT_ROOT, varargin)
-% prepare_gridcat_directory - Prepare data for GridCat analysis from BIDS
+function prepare_gridcat_directory(PREPROC_ROOT, OUTPUT_ROOT, varargin)
+% prepare_gridcat_directory - Flatten the preprocessing derivatives for GridCAT
 %
 % Usage:
-%   prepare_gridcat_directory(BIDS_ROOT, OUTPUT_ROOT)
-%   prepare_gridcat_directory(BIDS_ROOT, OUTPUT_ROOT, 'IncludeTasks', {'task-1','task-2','task-3'})
-%   prepare_gridcat_directory(BIDS_ROOT, OUTPUT_ROOT, 'DryRun', true)
+%   prepare_gridcat_directory(PREPROC_ROOT, OUTPUT_ROOT)
+%   prepare_gridcat_directory(PREPROC_ROOT, OUTPUT_ROOT, 'IncludeTasks', {'task-1','task-2'})
+%   prepare_gridcat_directory(PREPROC_ROOT, OUTPUT_ROOT, 'DryRun', true)
 %
 % Inputs:
-%   BIDS_ROOT   - Path to BIDS directory
-%   OUTPUT_ROOT - Path to output directory (will create GLM_runauto here)
+%   PREPROC_ROOT - The spm-preproc derivatives dataset written by
+%                  run_spm_preproc.m (<DERIV_ROOT>/spm-preproc), laid out as
+%                  sub-XX/ses-YY/{func,anat}. Not the raw BIDS directory:
+%                  nothing GridCAT needs lives there any more.
+%   OUTPUT_ROOT  - Path to output directory (will create GLM_runauto here)
 %
 % Optional Name-Value Pairs:
 %   'IncludeTasks'  - Cell array of tasks to include (default: all except rest/reverse)
@@ -17,6 +20,8 @@ function prepare_gridcat_directory(BIDS_ROOT, OUTPUT_ROOT, varargin)
 %   'ROIPrefix'     - Prefix for ROI files (default: 'r')
 %   'RPPrefix'      - Prefix for motion regressor files (default: 'rp')
 %   'CopyMode'      - 'copy' or 'symlink' (default: 'copy')
+%   'Reset'         - Empty the split/rp/ROI folders first (default: true).
+%                     EventFiles/ is never touched — you put those there.
 %   'DryRun'        - If true, only shows what would be done (default: false)
 %   'Verbose'       - Print detailed progress (default: true)
 %
@@ -25,15 +30,29 @@ function prepare_gridcat_directory(BIDS_ROOT, OUTPUT_ROOT, varargin)
 %       ├── functional_scans_split/  (3D split volumes)
 %       ├── rp_txt/                  (motion regressors)
 %       ├── ROI/                     (bilateral masks)
+%       ├── EventFiles/Event_tables/ (yours — event tables, left alone)
+%       ├── run_manifest.tsv         (which run of each task was used)
 %       └── _logs/                   (processing log)
 %
+% RUN ENTITIES ARE DROPPED HERE, ON PURPOSE
+% -----------------------------------------
+% A session can hold several runs of a task, but exactly one of them was
+% preprocessed. Inside GLM_runauto every file is therefore renamed to the
+% plain <sub>_<ses>_task-<label> form, without the run entity. That is what
+% makes the event tables line up: they frequently carry no run in their names,
+% and matching a run-less event file against u..._task-run1_run-2_bold_0001.nii
+% either fails or, worse, matches the wrong run.
+%
+% Nothing is lost — run_manifest.tsv records which run each flattened file came
+% from, and the derivatives keep their full BIDS names.
+%
 % Example:
-%   prepare_gridcat_directory('/sc-projects/.../b2_bids', '/sc-projects/.../analysis', ...
-%       'IncludeTasks', {'task-1','task-2','task-3'}, 'CopyMode', 'symlink')
+%   prepare_gridcat_directory('/sc-projects/.../derivatives/spm-preproc', ...
+%       '/sc-projects/.../analysis', 'IncludeTasks', {'task-1','task-2'})
 
 %% Parse inputs
 p = inputParser;
-addRequired(p, 'BIDS_ROOT', @(x) ischar(x) || isstring(x));
+addRequired(p, 'PREPROC_ROOT', @(x) ischar(x) || isstring(x));
 addRequired(p, 'OUTPUT_ROOT', @(x) ischar(x) || isstring(x));
 addParameter(p, 'IncludeTasks', {}, @iscell);
 addParameter(p, 'ExcludeTasks', {'task-rest', 'task-reverse'}, @iscell);
@@ -47,12 +66,16 @@ addParameter(p, 'SPMPath', '', @ischar);
 addParameter(p, 'FuncSuffix', '_bold', @ischar);  % '_bold' or '_bold_dc' (topup)
 addParameter(p, 'SubjectList', '', @ischar);       % path to subses_list.txt (filtered)
 addParameter(p, 'MaxWorkers', 0, @isnumeric);      % 0 = auto (ncores-1), >0 = explicit
+addParameter(p, 'Reset', true, @(x) islogical(x) || isnumeric(x));
 
-parse(p, BIDS_ROOT, OUTPUT_ROOT, varargin{:});
+parse(p, PREPROC_ROOT, OUTPUT_ROOT, varargin{:});
 cfg = p.Results;
+cfg.Reset = logical(cfg.Reset);
 
-% Ensure paths exist
-assert(isfolder(cfg.BIDS_ROOT), 'BIDS_ROOT not found: %s', cfg.BIDS_ROOT);
+assert(isfolder(cfg.PREPROC_ROOT), [ ...
+    'Preprocessing derivatives not found:\n  %s\n' ...
+    'Run the preprocessing first (menu option 2), or check DERIV_ROOT in\n' ...
+    'pipeline_config.cfg.'], cfg.PREPROC_ROOT);
 
 % Initialize SPM if provided
 if ~isempty(cfg.SPMPath)
@@ -71,8 +94,22 @@ FUNC_DIR = fullfile(GLM_DIR, 'functional_scans_split');
 RP_DIR = fullfile(GLM_DIR, 'rp_txt');
 ROI_DIR = fullfile(GLM_DIR, 'ROI');
 LOG_DIR = fullfile(GLM_DIR, '_logs');
+MANIFEST_FILE = fullfile(GLM_DIR, 'run_manifest.tsv');
 
 if ~cfg.DryRun
+    % Start from empty folders. Preparing twice — after changing the smoothing
+    % kernel, or after a different run was selected — would otherwise leave the
+    % previous flattening in place, and GridCAT picks up files by prefix: the
+    % stale volumes would be analysed alongside the new ones.
+    if cfg.Reset
+        for d = {FUNC_DIR, RP_DIR, ROI_DIR}
+            if isfolder(d{1})
+                fprintf('Clearing %s\n', d{1});
+                rmdir(d{1}, 's');
+            end
+        end
+    end
+
     if ~isfolder(cfg.OUTPUT_ROOT), mkdir(cfg.OUTPUT_ROOT); end
     if ~isfolder(GLM_DIR), mkdir(GLM_DIR); end
     if ~isfolder(FUNC_DIR), mkdir(FUNC_DIR); end
@@ -89,7 +126,7 @@ if ~cfg.DryRun
     logFID = fopen(logFile, 'w');
     fprintf(logFID, 'GridCat Data Preparation Log\n');
     fprintf(logFID, 'Started: %s\n', datestr(now));
-    fprintf(logFID, 'BIDS Root: %s\n', cfg.BIDS_ROOT);
+    fprintf(logFID, 'Preprocessing derivatives: %s\n', cfg.PREPROC_ROOT);
     fprintf(logFID, 'Output Root: %s\n\n', cfg.OUTPUT_ROOT);
 else
     logFID = 1; % stdout
@@ -99,14 +136,15 @@ end
 %% Discover BIDS structure
 if ~isempty(cfg.SubjectList) && isfile(cfg.SubjectList)
     fprintf('Using filtered subject list: %s\n', cfg.SubjectList);
-    subjects = load_subjects_from_list(cfg.BIDS_ROOT, cfg.SubjectList);
+    subjects = load_subjects_from_list(cfg.PREPROC_ROOT, cfg.SubjectList);
 else
-    fprintf('Scanning BIDS directory...\n');
-    subjects = discover_bids_subjects(cfg.BIDS_ROOT);
+    fprintf('Scanning the preprocessing derivatives...\n');
+    subjects = discover_bids_subjects(cfg.PREPROC_ROOT);
 end
 
 if isempty(subjects)
-    error('No valid BIDS subjects found in %s', cfg.BIDS_ROOT);
+    error(['No preprocessed subjects found in %s\n' ...
+           'Has the preprocessing run? It writes sub-XX/ses-YY/func there.'], cfg.PREPROC_ROOT);
 end
 
 fprintf('Found %d subjects\n', numel(subjects));
@@ -120,13 +158,13 @@ end
 
 %% Build flat list of session work items (sequential planning phase)
 % Flatten subjects × sessions into a simple array for parallel dispatch.
-sesItems = struct('sub', {}, 'ses', {}, 'funcDir', {}, 'anatDir', {}, 'tasks', {});
+sesItems = struct('sub', {}, 'ses', {}, 'funcDir', {}, 'anatDir', {}, 'tasks', {}, 'sesDir', {});
 idx = 0;
 for s = 1:numel(subjects)
     sub = subjects(s).name;
     for sess = 1:numel(subjects(s).sessions)
         ses = subjects(s).sessions{sess};
-        sesDir = fullfile(cfg.BIDS_ROOT, sub, ses);
+        sesDir = fullfile(cfg.PREPROC_ROOT, sub, ses);
         fDir   = fullfile(sesDir, 'func');
         aDir   = fullfile(sesDir, 'anat');
 
@@ -136,6 +174,7 @@ for s = 1:numel(subjects)
         idx = idx + 1;
         sesItems(idx).sub     = sub;
         sesItems(idx).ses     = ses;
+        sesItems(idx).sesDir  = sesDir;
         sesItems(idx).funcDir = fDir;
         sesItems(idx).anatDir = aDir;
         sesItems(idx).tasks   = tasks;
@@ -187,8 +226,9 @@ else
 end
 
 %% Process all sessions (parallel when available)
-% Each iteration is fully independent: reads from BIDS, writes to its own
-% output files. No file naming conflicts because filenames include sub/ses.
+% Each iteration is fully independent: reads one session's derivatives, writes
+% to its own output files. No naming conflicts, because every output filename
+% is <sub>_<ses>_task-<label> and each session is handled exactly once.
 
 % Pre-extract scalars/strings for parfor broadcast
 funcPrefix_ = cfg.FuncPrefix;
@@ -222,6 +262,15 @@ end
 %% Merge results and write summary CSV
 summary = [allResults{:}];
 
+%% Write the run manifest
+% One line per flattened task, saying which run of it was preprocessed. The
+% GridCAT analysis reads this to pair each task with the right event table,
+% and it is the only place where the run entity survives the flattening.
+if ~cfg.DryRun && ~isempty(summary)
+    write_run_manifest(MANIFEST_FILE, summary);
+    fprintf('Run manifest written to: %s\n', MANIFEST_FILE);
+end
+
 if logFID > 1
     for i = 1:numel(summary)
         fprintf(logFID, '  %s %s %s: func=%d (%d vols), rp=%d, roi_L=%d, roi_R=%d, bilat=%d\n', ...
@@ -253,8 +302,15 @@ end
 
 function results = process_one_session(item, FUNC_DIR, RP_DIR, ROI_DIR, ...
     funcPrefix, funcSuffix, rpPrefix, roiPrefix, copyMode, verbose, dryRun)
-% PROCESS_ONE_SESSION  Process a single subject-session (parfor-safe).
+% PROCESS_ONE_SESSION  Flatten a single subject-session (parfor-safe).
+%
 % Returns a struct array with one entry per task (+ ROI info on last entry).
+%
+% Everything is renamed on the way out: the derivatives keep the full BIDS
+% name of the run that was preprocessed (u<sub>_<ses>_task-run1_run-2_bold.nii),
+% and GLM_runauto gets the run-free form (u<sub>_<ses>_task-run1_bold.nii).
+% Only one run per task was preprocessed, so nothing becomes ambiguous, and the
+% event tables — which often carry no run entity — line up by name.
 
     sub  = item.sub;
     ses  = item.ses;
@@ -265,48 +321,57 @@ function results = process_one_session(item, FUNC_DIR, RP_DIR, ROI_DIR, ...
 
     results = struct('sub', {}, 'ses', {}, 'task', {}, ...
         'func_found', {}, 'func_volumes', {}, 'rp_found', {}, ...
-        'roi_left_found', {}, 'roi_right_found', {}, 'roi_bilat_created', {});
+        'roi_left_found', {}, 'roi_right_found', {}, 'roi_bilat_created', {}, ...
+        'source_run', {}, 'source_file', {});
 
     for t = 1:nTasks
         task = tasks{t};
         r = struct('sub', sub, 'ses', ses, 'task', task, ...
             'func_found', false, 'func_volumes', 0, 'rp_found', false, ...
-            'roi_left_found', false, 'roi_right_found', false, 'roi_bilat_created', false);
+            'roi_left_found', false, 'roi_right_found', false, 'roi_bilat_created', false, ...
+            'source_run', 'no-run', 'source_file', '');
 
-        % 1. Find and copy/split functional file
-        funcPattern = sprintf('%s%s_%s_%s%s.nii', funcPrefix, sub, ses, task, funcSuffix);
-        funcFiles = dir(fullfile(funcDir, funcPattern));
+        % 1. The preprocessed 4D BOLD for this task.
+        %    The run entity is not in the pattern: the derivatives hold exactly
+        %    one run per task, whichever one the preprocessing selected.
+        funcFile = find_one(funcDir, sprintf('^%s%s_%s_%s(_[^_]+)*%s\\.nii$', ...
+            regexptranslate('escape', funcPrefix), regexptranslate('escape', sub), ...
+            regexptranslate('escape', ses), regexptranslate('escape', task), ...
+            regexptranslate('escape', funcSuffix)), sub, ses, task, 'functional file');
 
-        if isempty(funcFiles)
-            warning('No functional file found for %s %s %s', sub, ses, task);
-        else
-            funcFile = fullfile(funcDir, funcFiles(1).name);
-            r.func_found = true;
+        if ~isempty(funcFile)
+            r.func_found  = true;
+            r.source_file = funcFile;
+            r.source_run  = run_label_of(funcFile);
 
             if ~dryRun
-                targetFunc = fullfile(FUNC_DIR, funcFiles(1).name);
+                % Flat name, run entity dropped
+                targetName = sprintf('%s%s_%s_%s%s.nii', funcPrefix, sub, ses, task, funcSuffix);
+                targetFunc = fullfile(FUNC_DIR, targetName);
                 copy_or_link(funcFile, targetFunc, copyMode, verbose);
 
                 nVols = split_4d_to_3d(targetFunc, verbose);
                 r.func_volumes = nVols;
 
                 delete(targetFunc);  % Remove 4D copy after split
-                fprintf('    %s %s %s: split into %d volumes\n', sub, ses, task, nVols);
+                fprintf('    %s %s %s (%s): split into %d volumes\n', ...
+                    sub, ses, task, r.source_run, nVols);
             end
         end
 
-        % 2. Find and copy motion regressors
-        rpPattern = sprintf('%s*%s*%s*%s*.txt', rpPrefix, sub, ses, task);
-        rpFiles = dir(fullfile(funcDir, rpPattern));
-        rpFiles = rpFiles(~startsWith({rpFiles.name}, '._'));
+        % 2. The motion regressors SPM wrote for that same file.
+        %    rp_*.txt is named after the BOLD it came from, so the run entity
+        %    has to be tolerated here too.
+        rpFile = find_one(funcDir, sprintf('^%s_.*%s_%s_%s(_|\\.).*\\.txt$', ...
+            regexptranslate('escape', strip_trailing_underscore(rpPrefix)), ...
+            regexptranslate('escape', sub), regexptranslate('escape', ses), ...
+            regexptranslate('escape', task)), sub, ses, task, 'motion regressor');
 
-        if isempty(rpFiles)
-            warning('No motion regressor found for %s %s %s', sub, ses, task);
-        else
+        if ~isempty(rpFile)
             r.rp_found = true;
             if ~dryRun
-                rpFile  = fullfile(funcDir, rpFiles(1).name);
-                targetRP = fullfile(RP_DIR, rpFiles(1).name);
+                targetRP = fullfile(RP_DIR, sprintf('%s_%s_%s_%s.txt', ...
+                    strip_trailing_underscore(rpPrefix), sub, ses, task));
                 copy_or_link(rpFile, targetRP, copyMode, verbose);
             end
         end
@@ -315,8 +380,7 @@ function results = process_one_session(item, FUNC_DIR, RP_DIR, ROI_DIR, ...
     end
 
     % 3. Process ROI masks (once per session, recorded on last task entry)
-    roiAllPattern = sprintf('%s*%s*%s*.nii', roiPrefix, sub, ses);
-    roiAllFiles = dir(fullfile(anatDir, roiAllPattern));
+    roiAllFiles = dir(fullfile(anatDir, sprintf('%s*%s*%s*.nii', roiPrefix, sub, ses)));
     roiAllFiles = roiAllFiles(~startsWith({roiAllFiles.name}, '._'));
 
     namesAll = {roiAllFiles.name};
@@ -346,8 +410,10 @@ function results = process_one_session(item, FUNC_DIR, RP_DIR, ROI_DIR, ...
     if ~dryRun
         roiLeftFile  = fullfile(anatDir, roiLeftFiles(1).name);
         roiRightFile = fullfile(anatDir, roiRightFiles(1).name);
-        targetLeft   = fullfile(ROI_DIR, roiLeftFiles(1).name);
-        targetRight  = fullfile(ROI_DIR, roiRightFiles(1).name);
+
+        % Drop the run entity here too, so the analysis finds one mask per side
+        targetLeft   = fullfile(ROI_DIR, drop_run_entity(roiLeftFiles(1).name));
+        targetRight  = fullfile(ROI_DIR, drop_run_entity(roiRightFiles(1).name));
 
         copy_or_link(roiLeftFile, targetLeft, copyMode, verbose);
         copy_or_link(roiRightFile, targetRight, copyMode, verbose);
@@ -365,9 +431,89 @@ function results = process_one_session(item, FUNC_DIR, RP_DIR, ROI_DIR, ...
     end
 end
 
+function out = find_one(folder, pattern, sub, ses, task, what)
+% FIND_ONE  The single file matching a pattern, or '' with a clear warning.
+%
+% More than one match means the derivatives hold two runs of the same task —
+% which the preprocessing does not produce, but a directory that was never
+% cleared between runs does. Picking one at random is how a session ends up
+% analysed with the wrong run, so this refuses to choose.
+
+out = '';
+d = dir(folder);
+hits = {};
+for i = 1:numel(d)
+    if d(i).isdir, continue; end
+    if startsWith(d(i).name, '._'), continue; end
+    if ~isempty(regexp(d(i).name, pattern, 'once'))
+        hits{end+1} = d(i).name; %#ok<AGROW>
+    end
+end
+
+if isempty(hits)
+    warning('prepare_gridcat:MissingFile', 'No %s found for %s %s %s in %s', ...
+            what, sub, ses, task, folder);
+    return;
+end
+
+if numel(hits) > 1
+    warning('prepare_gridcat:AmbiguousFile', [ ...
+        'Several %s files for %s %s %s in %s:\n  %s\n' ...
+        'The preprocessing writes one run per task, so this directory holds\n' ...
+        'output from more than one run. Re-run the preprocessing with\n' ...
+        'DERIV_RESET=auto (the default) to clear it, and skip this session.'], ...
+        what, sub, ses, task, folder, strjoin(hits, sprintf('\n  ')));
+    return;
+end
+
+out = fullfile(folder, hits{1});
+end
+
+function lbl = run_label_of(f)
+% The run entity of a filename, or 'no-run'.
+[~, base] = fileparts(f);
+tok = regexp(base, '_run-([A-Za-z0-9]+)', 'tokens', 'once');
+if isempty(tok)
+    lbl = 'no-run';
+else
+    lbl = ['run-' tok{1}];
+end
+end
+
+function out = drop_run_entity(name)
+% Remove the _run-N entity from a BIDS filename.
+out = regexprep(name, '_run-[A-Za-z0-9]+', '');
+end
+
+function p = strip_trailing_underscore(p)
+p = regexprep(p, '_+$', '');
+end
+
+function write_run_manifest(manifestFile, summary)
+% WRITE_RUN_MANIFEST  Which run of each task ended up in GLM_runauto.
+%
+% run_gridcat_analysis.m reads this to decide whether an event table named
+% ..._run-2_EventData.txt belongs to the data that was actually preprocessed.
+% An event file with no run entity matches whatever is listed here.
+
+fid = fopen(manifestFile, 'w');
+if fid < 0
+    warning('prepare_gridcat:ManifestFailed', 'Could not write %s', manifestFile);
+    return;
+end
+
+fprintf(fid, 'subject\tsession\ttask\tselected_run\tsource_file\n');
+for i = 1:numel(summary)
+    if ~summary(i).func_found, continue; end
+    fprintf(fid, '%s\t%s\t%s\t%s\t%s\n', summary(i).sub, summary(i).ses, ...
+        summary(i).task, summary(i).source_run, summary(i).source_file);
+end
+fclose(fid);
+end
+
 
 function subjects = discover_bids_subjects(bidsRoot)
-% Find all valid BIDS subjects and their sessions
+% Find all subjects and sessions in a BIDS-style tree (raw or derivative)
 subjects = struct('name', {}, 'sessions', {});
 
 d = dir(bidsRoot);
@@ -402,7 +548,9 @@ function subjects = load_subjects_from_list(bidsRoot, listFile)
 % LOAD_SUBJECTS_FROM_LIST  Read subses_list.txt and build subjects struct.
 %
 % Returns the same struct format as discover_bids_subjects, but only
-% includes subject-session pairs from the filtered list file.
+% includes subject-session pairs from the filtered list file. bidsRoot is the
+% preprocessing derivatives here, so a pair whose func/ is missing simply has
+% not been preprocessed yet.
 
 subjects = struct('name', {}, 'sessions', {});
 
@@ -454,7 +602,8 @@ for i = 1:numel(keys)
         if isfolder(checkDir)
             validSessions{end+1} = ses; %#ok<AGROW>
         else
-            fprintf('  WARNING: Skipping %s %s — func/ not found\n', sub, ses);
+            fprintf('  WARNING: Skipping %s %s — no preprocessed func/ in %s\n', ...
+                    sub, ses, bidsRoot);
         end
     end
     if ~isempty(validSessions)
@@ -468,44 +617,60 @@ fprintf('  Loaded %d subjects (%d sessions) from %s\n', ...
 end
 
 function tasks = find_session_tasks(funcDir, cfg)
-% Find all tasks in a session's func directory
+% FIND_SESSION_TASKS  The task labels this session has preprocessed data for.
 tasks = {};
 
 if ~isfolder(funcDir)
     return;
 end
 
-% Find all functional files matching prefix + suffix
-% FuncSuffix is '_bold' (realign_unwarp/realign_only) or '_bold_dc' (topup+applytopup)
-pattern = sprintf('%s*%s.nii', cfg.FuncPrefix, cfg.FuncSuffix);
+% All functional files matching prefix + suffix.
+% FuncSuffix is '_bold' (realign_unwarp/realign_only) or '_bold_dc' (topup+applytopup).
+% The 'sub-' after the prefix matters: with FuncPrefix='su', a bare 'su*_bold.nii'
+% also matches the raw sub-XX_..._bold.nii the preprocessing staged, because a
+% BIDS name starts with 'sub-'.
+pattern = sprintf('%ssub-*%s.nii', cfg.FuncPrefix, cfg.FuncSuffix);
 files = dir(fullfile(funcDir, pattern));
 files = files(~startsWith({files.name}, '._'));
 
 for i = 1:numel(files)
-    % Extract task from filename
-    tok = regexp(files(i).name, '_task-([^_]+)_', 'tokens', 'once');
+    name = files(i).name;
+
+    % The per-task and session mean images match the same prefix pattern
+    % (meanu<sub>_..._task-run1_bold.nii). They are not runs and must not
+    % become tasks — this is why 'mean' had to be listed in EXCLUDE_TASKS.
+    if ~isempty(regexp(name, '^mean', 'once')) || ...
+       ~isempty(regexp(name, ['^' regexptranslate('escape', cfg.FuncPrefix) 'mean'], 'once'))
+        continue;
+    end
+
+    % Extract the task label. The run entity, when there is one, sits between
+    % the task and the suffix and is not part of the label.
+    tok = regexp(name, '_task-([A-Za-z0-9]+)', 'tokens', 'once');
     if isempty(tok)
         continue;
     end
-    
+
     task = ['task-' tok{1}];
-    
+
     % Apply task filtering
     if ~isempty(cfg.IncludeTasks)
         if ~any(strcmp(task, cfg.IncludeTasks))
             continue;
         end
     end
-    
+
     if any(strcmp(task, cfg.ExcludeTasks))
         continue;
     end
-    
+
     % Add to list if not already there
     if ~any(strcmp(task, tasks))
         tasks{end+1} = task; %#ok<AGROW>
     end
 end
+
+tasks = sort(tasks);
 end
 
 function copy_or_link(source, target, mode, verbose)
