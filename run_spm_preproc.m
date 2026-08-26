@@ -7,6 +7,8 @@ function run_spm_preproc(BIDS_ROOT, SUB, SES, cfgFile, stages)
 %   run_spm_preproc('/sc-projects/.../b2_bids','sub-01s06','ses-01', '', 'realign,coreg,smooth')
 %
 % For one subject/session:
+% - Picks one run of each input (BOLD per task, T2w, fieldmap, reverse-PE EPI)
+%     and copies it into the derivatives directory
 % - Finds fmap magnitude1 + phasediff, or the reverse phase-encode EPI
 % - For each task, builds a voxel displacement map matched to that run's geometry
 % - Runs Realign & Unwarp for the whole session with one data block per task
@@ -14,6 +16,45 @@ function run_spm_preproc(BIDS_ROOT, SUB, SES, cfgFile, stages)
 % - Creates a session mean by averaging the per-task means
 % - Coregisters T2w -> session mean and reslices ROI left/right into EPI space
 % - Optionally smooths the preprocessed BOLD files
+%
+% WHERE THE OUTPUT GOES
+% ---------------------
+% Nothing is ever written into BIDS_ROOT. Every input SPM touches is copied
+% into a BIDS-style derivatives tree first:
+%
+%   <DERIV_ROOT>/spm-preproc/<sub>/<ses>/func/   u*_bold.nii, rp_*.txt, vdm_*,
+%                                                topup_*, meanu_session.nii, su*
+%                                     /anat/     the T2w and the resliced ROIs
+%                                     /fmap/     the fieldmap inputs
+%
+% This matters beyond tidiness: SPM's Realign & Unwarp and Coregister write the
+% transforms they estimate into the *headers of their input images*, and
+% ensure_nii used to leave decompressed twins of every .nii.gz behind. Reading
+% raw BIDS and writing derivatives keeps the source data untouched.
+%
+% A full run (a stage list that starts the preprocessing from its beginning)
+% clears the session's derivatives first, so the result is never a mixture of
+% this run and the last one. Partial runs keep them — that is what they resume
+% from. See DERIV_RESET in pipeline_config.cfg.
+%
+% MULTIPLE RUNS OF THE SAME SCAN
+% ------------------------------
+% When a session holds several runs of a scan, one is chosen per input, in this
+% order of preference:
+%
+%   1. The choice in run_selection.tsv (RUN_SELECTION_FILE). Write it with
+%      bash scan_multirun.sh, which lists every run with its acquisition time.
+%   2. The run acquired closest in time to the BOLD being preprocessed, when
+%      the JSON sidecars carry AcquisitionTime. Run numbers are counted per
+%      modality, so run-2 of the T2w need not belong with run-2 of a task —
+%      if the subject climbed out of the scanner in between, they do not.
+%      Acquisition time is what actually says which scans belong together.
+%   3. Nothing else is safe. With STRICT_RUN_MATCHING=true the run stops and
+%      asks for a selection; otherwise it takes the highest run number and
+%      says loudly that it guessed.
+%
+% The chosen runs are recorded in <ses>/preproc_run_selection.tsv, which the
+% GridCAT preparation reads so the event files line up with the right run.
 %
 % STAGES (5th argument, or PREPROC_STAGES in pipeline_config.cfg)
 % ---------------------------------------------------------------
@@ -88,11 +129,31 @@ else
     CFG.TASK_LABELS = strtrim(strsplit(cfgRaw.TASKS, ','));
 end
 
-% Run selection file (for multi-run T2w/BOLD)
+% Run selection file (for multi-run T2w/BOLD/fieldmap/reverse-PE)
 if isfield(cfgRaw, 'RUN_SELECTION_FILE') && ~isempty(cfgRaw.RUN_SELECTION_FILE)
     CFG.RUN_SELECTION_FILE = cfgRaw.RUN_SELECTION_FILE;
 else
     CFG.RUN_SELECTION_FILE = '';
+end
+
+% How far apart two scans may be acquired and still count as the same visit to
+% the scanner. Runs further apart than this are treated as different blocks,
+% which is what happens when the subject gets out and comes back.
+if isfield(cfgRaw, 'RUN_MATCH_GAP_MIN') && ~isempty(cfgRaw.RUN_MATCH_GAP_MIN)
+    CFG.RUN_MATCH_GAP_SEC = double(cfgRaw.RUN_MATCH_GAP_MIN) * 60;
+else
+    CFG.RUN_MATCH_GAP_SEC = 20 * 60;
+end
+
+% Stop rather than guess when several runs exist and nothing decides between
+% them. Silently pairing the wrong T2w with a task is worse than not running.
+CFG.STRICT_RUN_MATCHING = cfg_flag(cfgRaw, 'STRICT_RUN_MATCHING', true);
+
+% Clearing the derivatives before a full run: auto | always | never
+if isfield(cfgRaw, 'DERIV_RESET') && ~isempty(cfgRaw.DERIV_RESET)
+    CFG.DERIV_RESET = lower(strtrim(char(cfgRaw.DERIV_RESET)));
+else
+    CFG.DERIV_RESET = 'auto';
 end
 
 % ROI patterns
@@ -246,12 +307,23 @@ addpath(CFG.SPM_DIR);
 spm('defaults','FMRI');
 spm_jobman('initcfg');
 
-subDir  = fullfile(BIDS_ROOT, SUB, SES);
-funcDir = fullfile(subDir, 'func');
-anatDir = fullfile(subDir, 'anat');
-fmapDir = fullfile(subDir, 'fmap');
+% --------- Raw BIDS: read only, never written to ----------
+RAW = struct();
+RAW.ses  = fullfile(BIDS_ROOT, SUB, SES);
+RAW.func = fullfile(RAW.ses, 'func');
+RAW.anat = fullfile(RAW.ses, 'anat');
+RAW.fmap = fullfile(RAW.ses, 'fmap');
 
-assert(isfolder(funcDir), 'Missing func dir: %s', funcDir);
+assert(isfolder(RAW.func), 'Missing func dir: %s', RAW.func);
+
+% --------- Derivatives: everything this run writes ----------
+DER = bids_deriv(cfgRaw, SUB, SES);
+doReset = deriv_reset_wanted(CFG, STAGES);
+bids_reset_deriv(DER, doReset);
+
+funcDir = DER.func;   % kept as short names: every stage below writes here
+anatDir = DER.anat;
+fmapDir = DER.fmap;
 
 fprintf('\n=== %s / %s ===\n', SUB, SES);
 fprintf('Preprocessing mode: %s\n', CFG.PREPROC_MODE);
@@ -259,78 +331,118 @@ fprintf('Stages to run:      %s\n', strjoin(STAGES.list, ' -> '));
 if ~isempty(STAGES.skipped)
     fprintf('Stages skipped:     %s\n', strjoin(STAGES.skipped, ', '));
 end
+fprintf('Reading from:       %s\n', RAW.ses);
+fprintf('Writing to:         %s%s\n', DER.sesDir, tern(doReset, '   (cleared first)', '   (resuming)'));
 
 % --------- Which directories a run actually needs depends on the stages ------
 if STAGES.vdm && ismember(CFG.PREPROC_MODE, {'realign_unwarp','precalc_fieldmap'})
-    assert(isfolder(fmapDir), 'Missing fmap dir: %s', fmapDir);
+    assert(isfolder(RAW.fmap) || isfolder(DER.fieldmapSes), ...
+        ['No fieldmap directory for %s / %s.\n' ...
+         '  Looked in %s\n  and in %s'], SUB, SES, RAW.fmap, DER.fieldmapSes);
 elseif STAGES.topup && strcmp(CFG.PREPROC_MODE, 'topup') && strcmp(CFG.TOPUP_REVERSE_PE_DIR, 'fmap')
-    assert(isfolder(fmapDir), 'Missing fmap dir: %s (TOPUP_REVERSE_PE_DIR=fmap)', fmapDir);
+    assert(isfolder(RAW.fmap), 'Missing fmap dir: %s (TOPUP_REVERSE_PE_DIR=fmap)', RAW.fmap);
 end
 if STAGES.coreg && CFG.DO_COREG_ROIS
-    assert(isfolder(anatDir), 'Missing anat dir: %s', anatDir);
+    assert(isfolder(RAW.anat), 'Missing anat dir: %s', RAW.anat);
 end
 
 % --------- Load run selection (multi-run overrides) ----------
-runSel = load_run_selection(CFG.RUN_SELECTION_FILE, SUB, SES);
+runSel = bids_load_selection(CFG.RUN_SELECTION_FILE, SUB, SES);
+if ~isempty(CFG.RUN_SELECTION_FILE) && isfile(CFG.RUN_SELECTION_FILE)
+    fprintf('Run selection:      %s\n', CFG.RUN_SELECTION_FILE);
+end
 
-% --------- Find fieldmap inputs (only for the stages that consume them) -----
+% =====================================================================
+%  Choose one run of each input, and copy it into the derivatives
+% =====================================================================
+nTasks = numel(CFG.TASK_LABELS);
+taskVols      = cell(nTasks,1);
+taskVDM       = cell(nTasks,1);
+taskBoldFiles = cell(nTasks,1);
+
+needVols = STAGES.vdm || STAGES.realign;
+
+% Smoothing on its own reads only what the earlier stages left in the
+% derivatives, so there is nothing to choose and nothing to copy.
+needSelection = STAGES.topup || STAGES.vdm || STAGES.realign || STAGES.coreg;
+
+boldPicks = repmat(struct('label', '', 'path', '', 'runLabel', '', ...
+                          'acqSec', NaN, 'reason', ''), nTasks, 1);
+anchor = struct('sec', NaN, 'secs', NaN, 'name', 'the functional data');
+for ii = 1:nTasks
+    boldPicks(ii).label = CFG.TASK_LABELS{ii};
+    taskVDM{ii} = '';
+end
+
+if needSelection
+    % --------- The BOLD run per task: what everything else matches to -------
+    fprintf('\n--- Choosing runs ---\n');
+    [boldPicks, anchor] = select_task_bolds(RAW.func, SUB, SES, CFG, runSel, needVols);
+
+    for ii = 1:nTasks
+        if isempty(boldPicks(ii).path), continue; end
+        taskBoldFiles{ii} = bids_stage(boldPicks(ii).path, funcDir);
+    end
+
+    if ~isnan(anchor.sec)
+        fprintf('  Matching other scans to %s (acquired %s)\n', anchor.name, clock_of(anchor.sec));
+    else
+        fprintf('  No acquisition times in the BOLD sidecars — other scans cannot be matched by time.\n');
+    end
+end
+
+% --------- Fieldmap inputs (only for the stages that consume them) -----------
 phasemap = '';
 magnitude1 = '';
 reversePE_epi = '';
 fieldmapFile = '';
 fieldmapMag = '';
+fieldmapSrc = '';       % raw path of the chosen fieldmap, for the manifest
+reverseSrc  = '';
+phasediffSrc = '';
 
 if strcmp(CFG.PREPROC_MODE, 'realign_unwarp') && STAGES.vdm
-    % GRE fieldmap mode: need phasediff + magnitude1
-    phasemap = first_match(fmapDir, [SUB '_' SES '.*phasediff.*\.nii$']);
-    if isempty(phasemap)
-        phasemap = first_match(fmapDir, '.*phasediff.*\.nii$');
-    end
-    magnitude1 = first_match(fmapDir, [SUB '_' SES '.*magnitude1.*\.nii$']);
-    if isempty(magnitude1)
-        magnitude1 = first_match(fmapDir, '.*magnitude1.*\.nii$');
-    end
-
-    assert(~isempty(phasemap),   'Could not find phasediff/phasemap in %s', fmapDir);
-    assert(~isempty(magnitude1), 'Could not find magnitude1 in %s', fmapDir);
-
-    phasemap = ensure_nii(phasemap);      % decompress .nii.gz for SPM
-    magnitude1 = ensure_nii(magnitude1);
+    % GRE fieldmap mode: need phasediff + the magnitude it pairs with
+    [phasediffSrc, magSrc] = select_phasediff(RAW.fmap, SUB, SES, CFG, runSel, anchor);
+    phasemap   = bids_stage(phasediffSrc, fmapDir);
+    magnitude1 = bids_stage(magSrc,       fmapDir);
 
     fprintf('Fieldmap phasediff:  %s\n', phasemap);
     fprintf('Fieldmap magnitude1: %s\n', magnitude1);
 
 elseif strcmp(CFG.PREPROC_MODE, 'precalc_fieldmap') && STAGES.vdm
     % Precalculated fieldmap mode: a ready-made B0 map plus the magnitude image
-    % it was unwrapped against — what make_fieldmaps.sh writes into fmap/.
-    [fieldmapFile, fieldmapMag] = find_precalc_fieldmap(fmapDir, SUB, SES, CFG, runSel);
-    fieldmapFile = ensure_nii(fieldmapFile);   % decompress .nii.gz for SPM
-    fieldmapMag  = ensure_nii(fieldmapMag);
+    % it was unwrapped against — what make_fieldmaps.sh writes.
+    [fieldmapSrc, magSrc] = select_precalc_fieldmap(RAW.fmap, DER.fieldmapSes, SUB, SES, CFG, runSel, anchor);
+    fieldmapFile = bids_stage(fieldmapSrc, fmapDir);
+    fieldmapMag  = bids_stage(magSrc,      fmapDir);
     fprintf('Fieldmap:           %s\n', fieldmapFile);
     fprintf('Fieldmap magnitude: %s\n', fieldmapMag);
     fprintf('Fieldmap units:     %s\n', CFG.FIELDMAP_UNITS);
 
 elseif strcmp(CFG.PREPROC_MODE, 'topup') && STAGES.topup
-    % Topup mode: find the reverse-PE EPI.
-    % Search directories based on TOPUP_REVERSE_PE_DIR setting:
-    %   'fmap' = fmap/ only, 'func' = func/ only, 'auto' = fmap/ then func/
-    reversePE_epi = find_reverse_pe_epi(subDir, SUB, SES, CFG, runSel);
+    % Topup mode: find the reverse-PE EPI acquired with these functional runs.
+    reverseSrc = select_reverse_pe(RAW, SUB, SES, CFG, runSel, anchor);
+    reversePE_epi = bids_stage(reverseSrc, fmapDir);
     fprintf('Reverse-PE EPI:  %s\n', reversePE_epi);
     fprintf('Topup apply method: %s\n', CFG.TOPUP_APPLY_METHOD);
 end
 
-% --------- Find T2w + ROIs (only the coreg stage uses them) ----------
-t2w = '';
+% --------- T2w + ROIs (only the coreg stage uses them) ----------
+t2w = '';  t2wSrc = '';
 roiL = ''; roiR = ''; hasRoiL = false; hasRoiR = false;
+roiLsrc = ''; roiRsrc = '';
 
 if STAGES.coreg && CFG.DO_COREG_ROIS
-    t2w = find_t2w(anatDir, SUB, SES, runSel);
-    t2w = ensure_nii(t2w);  % decompress .nii.gz for SPM
+    t2wSrc = select_t2w(RAW.anat, SUB, SES, CFG, runSel, anchor);
+    t2w = bids_stage(t2wSrc, anatDir);
     fprintf('T2w: %s\n', t2w);
 
-    [roiL, roiR, hasRoiL, hasRoiR] = find_rois(anatDir, SUB, SES, CFG);
-    if hasRoiL, roiL = ensure_nii(roiL); end  % decompress .nii.gz for SPM
-    if hasRoiR, roiR = ensure_nii(roiR); end
+    % ROI masks may have been imported into the derivatives by move_rois.sh, or
+    % may still be sitting in the raw anat/ from an earlier way of working.
+    [roiLsrc, roiRsrc, hasRoiL, hasRoiR] = find_rois({DER.roiSes, RAW.anat}, SUB, SES, CFG, runSel, anchor);
+    if hasRoiL, roiL = bids_stage(roiLsrc, anatDir); end
+    if hasRoiR, roiR = bids_stage(roiRsrc, anatDir); end
     fprintf('ROI left exists:  %d', hasRoiL);
     if hasRoiL, fprintf(' (%s)', roiL); end
     fprintf('\n');
@@ -339,33 +451,38 @@ if STAGES.coreg && CFG.DO_COREG_ROIS
     fprintf('\n');
 end
 
-% --------- Validate config against BIDS JSON sidecars ----------
-% Only meaningful for the stages that read acquisition parameters.
-if STAGES.topup || STAGES.vdm || STAGES.realign
-    validate_bids_params(funcDir, fmapDir, SUB, SES, CFG);
+% --------- Record what was chosen ----------
+% The GridCAT preparation reads this back, so the event tables end up with the
+% run that was actually preprocessed even when their filenames say nothing
+% about runs. A partial run only decided some of these, so the file is merged
+% rather than replaced — otherwise re-running the coreg stage on its own would
+% erase which BOLD run the realignment used.
+if needSelection
+    write_run_manifest(DER, SUB, SES, CFG, boldPicks, ...
+        struct('T2w', t2wSrc, 'fieldmap', fieldmapSrc, 'phasediff', phasediffSrc, ...
+               'reverse', reverseSrc, 'roi_left', roiLsrc, 'roi_right', roiRsrc), ...
+        anchor);
 end
 
-% --------- Locate the BOLD run for each task ----------
-nTasks = numel(CFG.TASK_LABELS);
-taskVols      = cell(nTasks,1);
-taskVDM       = cell(nTasks,1);
-taskBoldFiles = cell(nTasks,1);
+% --------- Validate config against the BIDS JSON sidecars we chose ----------
+% Reading the sidecars of the selected files (not "any file in the folder")
+% means the check describes the run actually being preprocessed.
+if STAGES.topup || STAGES.vdm || STAGES.realign
+    validate_bids_params(taskBoldFiles, reversePE_epi, phasemap, fieldmapFile, CFG);
+end
 
-needVols = STAGES.vdm || STAGES.realign;
-
+% --------- Expand the staged BOLD into per-volume references ----------
 for ii = 1:nTasks
-    tLabel = CFG.TASK_LABELS{ii};   % e.g. 'run1', '1', 'run2', etc.
-
-    boldFile = find_bold(funcDir, SUB, SES, tLabel, runSel);
-    boldFile = ensure_nii(boldFile);  % decompress .nii.gz for SPM
-    taskBoldFiles{ii} = boldFile;
-    taskVDM{ii} = '';
-
+    tLabel = CFG.TASK_LABELS{ii};
     fprintf('\n--- Task %s ---\n', tLabel);
-    fprintf('BOLD: %s\n', boldFile);
+    if isempty(taskBoldFiles{ii})
+        fprintf('BOLD: (not needed by the selected stages)\n');
+        continue;
+    end
+    fprintf('BOLD: %s   [%s]\n', taskBoldFiles{ii}, boldPicks(ii).reason);
 
     if needVols
-        taskVols{ii} = expand_4d(boldFile);   % cellstr of '...nii,1' '...nii,2' ...
+        taskVols{ii} = expand_4d(taskBoldFiles{ii});   % '...nii,1' '...nii,2' ...
     end
 end
 
@@ -419,13 +536,13 @@ if STAGES.vdm
             switch CFG.PREPROC_MODE
                 case 'realign_unwarp'
                     fprintf('Calculating VDM for task-%s...\n', tLabel);
-                    taskVDM{ii} = calc_vdm_for_run_to_func(phasemap, magnitude1, epiRef, funcDir, fmapDir, CFG, ii);
+                    taskVDM{ii} = calc_vdm_for_run_to_func(phasemap, magnitude1, epiRef, funcDir, fmapDir, CFG, tLabel);
                 case 'precalc_fieldmap'
                     fprintf('Calculating VDM from precalculated fieldmap for task-%s...\n', tLabel);
-                    taskVDM{ii} = calc_vdm_from_fieldmap(fieldmapHz, fieldmapMag, epiRef, funcDir, fmapDir, CFG, ii);
+                    taskVDM{ii} = calc_vdm_from_fieldmap(fieldmapHz, fieldmapMag, epiRef, funcDir, fmapDir, CFG, tLabel);
                 otherwise
                     fprintf('Converting topup field to VDM for task-%s...\n', tLabel);
-                    taskVDM{ii} = convert_topup_to_vdm(topupPrefix, epiRef, funcDir, CFG, ii);
+                    taskVDM{ii} = convert_topup_to_vdm(topupPrefix, epiRef, funcDir, CFG, tLabel);
             end
             fprintf('VDM (task-%s): %s\n', tLabel, taskVDM{ii});
         end
@@ -450,12 +567,12 @@ if STAGES.realign
         % Fill in any VDM this run did not build itself (vdm stage skipped)
         for ii = 1:nTasks
             if isempty(taskVDM{ii})
-                taskVDM{ii} = existing_task_vdm(funcDir, ii);
+                taskVDM{ii} = existing_task_vdm(funcDir, CFG.TASK_LABELS{ii}, ii);
                 assert(~isempty(taskVDM{ii}), [ ...
-                    'No voxel displacement map for task %d (%s).\n' ...
+                    'No voxel displacement map for task-%s.\n' ...
                     'Expected: %s\n' ...
                     'Run the "vdm" stage first, or copy a ready-made VDM to that path.'], ...
-                    ii, CFG.TASK_LABELS{ii}, fullfile(funcDir, sprintf('vdm_task-%d.nii', ii)));
+                    CFG.TASK_LABELS{ii}, fullfile(funcDir, sprintf('vdm_task-%s.nii', CFG.TASK_LABELS{ii})));
                 fprintf('Reusing existing VDM (task-%s): %s\n', CFG.TASK_LABELS{ii}, taskVDM{ii});
             end
         end
@@ -467,7 +584,9 @@ if STAGES.realign
         correctedVols = cell(nTasks,1);
         for ii = 1:nTasks
             tLabel = CFG.TASK_LABELS{ii};
-            correctedBold = fullfile(funcDir, sprintf('%s_%s_task-%s_bold_dc.nii', SUB, SES, tLabel));
+            % Keep every BIDS entity of the file it came from, so a multi-run
+            % session still says which run was corrected.
+            correctedBold = regexprep(taskBoldFiles{ii}, '_bold\.nii$', '_bold_dc.nii');
             correctedBold = run_fsl_applytopup(taskBoldFiles{ii}, topupPrefix, topupAcqFile, correctedBold, 1, CFG);
             fprintf('Corrected BOLD (task-%s): %s\n', tLabel, correctedBold);
             correctedVols{ii} = expand_4d(correctedBold);
@@ -524,24 +643,12 @@ if STAGES.smooth
 end
 
 % --------- Save preprocessing provenance log ----------
-save_provenance_log(funcDir, SUB, SES, CFG, cfgFile, taskBoldFiles, STAGES.list);
+save_provenance_log(DER, SUB, SES, CFG, cfgFile, taskBoldFiles, boldPicks, STAGES.list);
 
 fprintf('\nDONE: %s / %s  [stages: %s]\n\n', SUB, SES, strjoin(STAGES.list, ','));
 end
 
 % ============================== HELPERS ==============================
-
-function out = first_match(folder, regexPattern)
-d = dir(folder);
-out = '';
-for i=1:numel(d)
-    if d(i).isdir, continue; end
-    if ~isempty(regexp(d(i).name, regexPattern, 'once'))
-        out = fullfile(folder, d(i).name);
-        return;
-    end
-end
-end
 
 function out = newest_match(folder, regexPattern)
 d = dir(folder);
@@ -558,200 +665,533 @@ for i=1:numel(d)
 end
 end
 
-function matches = all_matches(folder, regexPattern)
-% Return all files matching regex in folder (cell array of full paths)
-d = dir(folder);
-matches = {};
-for i = 1:numel(d)
-    if d(i).isdir, continue; end
-    if ~isempty(regexp(d(i).name, regexPattern, 'once'))
-        matches{end+1} = fullfile(folder, d(i).name); %#ok<AGROW>
+% ===================== CHOOSING WHICH RUN TO USE =====================
+%
+% A session can hold several runs of the same scan. The run numbers are
+% counted per modality and carry no cross-modality meaning: if the subject
+% climbed out of the scanner between sequences, run-2 of the T2w and run-2 of
+% a task are from different visits and must not be paired.
+%
+% So the BOLD run being preprocessed is the anchor, and every other input is
+% matched to it: an explicit choice in run_selection.tsv first, otherwise the
+% run acquired closest in time, otherwise a refusal (or a loud guess).
+
+function [picks, anchor] = select_task_bolds(rawFuncDir, SUB, SES, CFG, runSel, required)
+% SELECT_TASK_BOLDS  One BOLD run per task label, and the anchor time.
+%
+% Returns a struct array with one entry per CFG.TASK_LABELS:
+%   .label .path .runLabel .acqSec .reason
+% and the anchor, which is what the anatomy and fieldmaps are matched against:
+%   .secs  every chosen functional run
+%   .sec   the earliest of them, and .name the task it belongs to
+%
+% Tasks are resolved in two passes. A task with only one run needs no decision
+% and pins down where the functional block is; those go first, and the tasks
+% that do need a decision are then matched against them. Resolving in config
+% order instead would leave the first task with nothing to match to — exactly
+% the case where a session has two runs of task-run1 and one of task-run2.
+
+nTasks = numel(CFG.TASK_LABELS);
+picks = repmat(struct('label', '', 'path', '', 'runLabel', '', ...
+                      'acqSec', NaN, 'reason', ''), nTasks, 1);
+
+anchor = struct('sec', NaN, 'secs', NaN, 'name', 'the functional data');
+
+% --------- Gather the candidates for every task ----------
+cands = cell(nTasks, 1);
+for ii = 1:nTasks
+    tLabel = CFG.TASK_LABELS{ii};
+    picks(ii).label = tLabel;
+
+    cands{ii} = bids_list_runs(rawFuncDir, struct('sub', SUB, 'ses', SES, ...
+                                                  'suffix', 'bold', 'task', tLabel, ...
+                                                  'prefix', ''));
+
+    if isempty(cands{ii}) && required
+        error('run_spm_preproc:NoBold', [ ...
+            'No BOLD file for task-%s in %s\n' ...
+            'Expected something like %s_%s_task-%s[_run-N]_bold.nii[.gz]\n' ...
+            'Check the TASKS setting in pipeline_config.cfg against the filenames.'], ...
+            tLabel, rawFuncDir, SUB, SES, tLabel);
     end
 end
-end
 
-function runSel = load_run_selection(tsvFile, SUB, SES)
-% LOAD_RUN_SELECTION  Load run_selection.tsv and return selections for this sub/ses.
-%
-% Returns struct with fields: T2w, task_<label>, reverse
-% Each field is empty (no selection) or 'run-N'.
-runSel = struct();
+% --------- Pass 1: the tasks that decide themselves ----------
+% Either only one run exists, or run_selection.tsv already names one.
+resolved = false(nTasks, 1);
+anchorSecs = [];
 
-if isempty(tsvFile) || ~isfile(tsvFile)
-    return;
-end
+for ii = 1:nTasks
+    if isempty(cands{ii}), continue; end
+    tLabel = picks(ii).label;
+    selected = bids_selection_for(runSel, ['task-' tLabel], tLabel);
 
-fid = fopen(tsvFile, 'r');
-if fid == -1, return; end
-
-% Read and skip header
-hdr = fgetl(fid);
-if ~ischar(hdr), fclose(fid); return; end
-
-while ~feof(fid)
-    line = fgetl(fid);
-    if ~ischar(line), break; end
-    line = strtrim(line);
-    if isempty(line), continue; end
-
-    parts = strsplit(line, '\t');
-    if numel(parts) < 5, continue; end
-
-    fSub = strtrim(parts{1});
-    fSes = strtrim(parts{2});
-    fType = strtrim(parts{3});
-    fSelected = strtrim(parts{5});
-
-    if ~strcmp(fSub, SUB) || ~strcmp(fSes, SES)
-        continue;
+    if numel(cands{ii}) > 1 && isempty(selected)
+        continue;   % needs an anchor; pass 2
     end
 
-    if isempty(fSelected), continue; end
+    [p, info] = bids_pick_run(cands{ii}, struct( ...
+        'label',    sprintf('BOLD task-%s', tLabel), ...
+        'selected', selected, ...
+        'gapSec',   CFG.RUN_MATCH_GAP_SEC, ...
+        'strict',   CFG.STRICT_RUN_MATCHING));
 
-    % Store selection: type -> selected run
-    % Normalise field name for MATLAB struct
-    fieldName = regexprep(fType, '[^a-zA-Z0-9]', '_');
-    runSel.(fieldName) = fSelected;
-end
-fclose(fid);
-end
-
-function t2w = find_t2w(anatDir, SUB, SES, runSel)
-% FIND_T2W  Find the T2w image, handling multi-run and .nii.gz.
-%
-% Priority:
-%   1. If run_selection.tsv specifies a run, use that
-%   2. If only one T2w file, use it
-%   3. If multiple, use the last run (highest number) and warn
-
-% Find all T2w NIfTI files
-t2wFiles = all_matches(anatDir, ['^' regexptranslate('escape',SUB) '_' regexptranslate('escape',SES) '.*T2w\.nii']);
-
-assert(~isempty(t2wFiles), 'No T2w file found in %s', anatDir);
-
-if numel(t2wFiles) == 1
-    t2w = t2wFiles{1};
-    return;
+    picks(ii) = store_pick(picks(ii), p, info);
+    resolved(ii) = true;
+    if ~isnan(info.acqSec), anchorSecs(end+1) = info.acqSec; end %#ok<AGROW>
+    fprintf('  BOLD task-%-8s %-10s %s\n', tLabel, info.runLabel, info.reason);
 end
 
-% Multiple T2w files — check run selection
-if isfield(runSel, 'T2w') && ~isempty(runSel.T2w)
-    selRun = runSel.T2w;
-    for i = 1:numel(t2wFiles)
-        [~, fname] = fileparts(t2wFiles{i});
-        % Handle .nii.gz double extension
-        fname = regexprep(fname, '\.nii$', '');
-        if contains(fname, selRun)
-            t2w = t2wFiles{i};
-            fprintf('  T2w: using selected %s (from run_selection.tsv)\n', selRun);
-            return;
+% --------- Pass 2: the rest, matched to what pass 1 settled ----------
+for ii = 1:nTasks
+    if resolved(ii) || isempty(cands{ii}), continue; end
+    tLabel = picks(ii).label;
+
+    [p, info] = bids_pick_run(cands{ii}, struct( ...
+        'label',      sprintf('BOLD task-%s', tLabel), ...
+        'selected',   '', ...
+        'anchorSec',  anchor_vector(anchorSecs), ...
+        'anchorName', 'the other functional runs', ...
+        'gapSec',     CFG.RUN_MATCH_GAP_SEC, ...
+        'strict',     CFG.STRICT_RUN_MATCHING));
+
+    picks(ii) = store_pick(picks(ii), p, info);
+    if ~isnan(info.acqSec), anchorSecs(end+1) = info.acqSec; end %#ok<AGROW>
+    fprintf('  BOLD task-%-8s %-10s %s\n', tLabel, info.runLabel, info.reason);
+end
+
+% --------- The anchor everything else is matched against ----------
+secs = [picks.acqSec];
+secs = secs(~isnan(secs));
+if ~isempty(secs)
+    anchor.secs = secs;
+    anchor.sec  = min(secs);
+    idx = 1;
+    for ii = 1:nTasks
+        if ~isnan(picks(ii).acqSec) && picks(ii).acqSec == anchor.sec
+            idx = ii;
+            break;
         end
     end
-    warning('run_selection.tsv specifies %s for T2w but no matching file found. Using last run.', selRun);
+    anchor.name = sprintf('task-%s %s', picks(idx).label, picks(idx).runLabel);
+
+    % Functional runs spread over more than one visit: the anatomy can only
+    % match one of them, so say so before anything is coregistered.
+    if max(secs) - min(secs) > CFG.RUN_MATCH_GAP_SEC
+        warning('run_spm_preproc:TasksSpanBlocks', [ ...
+            'The chosen functional runs span %.0f minutes, more than\n' ...
+            'RUN_MATCH_GAP_MIN. They were probably not acquired in one visit to the\n' ...
+            'scanner, so one session mean covers two head positions and the T2w can\n' ...
+            'only match one of them. Check run_selection.tsv for %s / %s.'], ...
+            (max(secs) - min(secs))/60, SUB, SES);
+    end
+end
 end
 
-% Default: use last run (sort and take last)
-t2wFiles = sort(t2wFiles);
-t2w = t2wFiles{end};
-fprintf('  T2w: multiple runs found (%d), using last: %s\n', numel(t2wFiles), t2w);
+function pick = store_pick(pick, p, info)
+pick.path     = p;
+pick.runLabel = info.runLabel;
+pick.acqSec   = info.acqSec;
+pick.reason   = info.reason;
 end
 
-function [roiL, roiR, hasRoiL, hasRoiR] = find_rois(anatDir, SUB, SES, CFG)
-% FIND_ROIS  Find left and right ROI masks using flexible matching.
+function v = anchor_vector(secs)
+if isempty(secs)
+    v = NaN;
+else
+    v = secs;
+end
+end
+
+function t2wFile = select_t2w(rawAnatDir, SUB, SES, CFG, runSel, anchor)
+% SELECT_T2W  The structural to coregister to the session mean.
+
+cands = bids_list_runs(rawAnatDir, struct('sub', SUB, 'ses', SES, ...
+                                          'suffix', 'T2w', 'prefix', ''));
+
+if isempty(cands)
+    error('run_spm_preproc:NoT2w', [ ...
+        'No T2w file in %s\n' ...
+        'Expected %s_%s[_run-N]_T2w.nii[.gz]'], rawAnatDir, SUB, SES);
+end
+
+[t2wFile, info] = bids_pick_run(cands, struct( ...
+    'label',      'T2w', ...
+    'selected',   bids_selection_for(runSel, 'T2w'), ...
+    'anchorSec',  anchor.secs, ...
+    'anchorName', anchor.name, ...
+    'gapSec',     CFG.RUN_MATCH_GAP_SEC, ...
+    'strict',     CFG.STRICT_RUN_MATCHING));
+
+fprintf('  T2w      %-10s %s\n', info.runLabel, info.reason);
+end
+
+function [phasediff, magFile] = select_phasediff(rawFmapDir, SUB, SES, CFG, runSel, anchor)
+% SELECT_PHASEDIFF  A GRE phasediff plus the magnitude1 acquired with it.
 %
-% Searches for files containing the ROI pattern as a substring,
-% tolerating extra BIDS entities (run-N, acq-*, etc.).
+% The magnitude has to come from the same acquisition as the phase difference,
+% not merely from the same session: it is what the phase is unwrapped against.
+% So the phasediff is chosen first and the magnitude is taken from the file
+% carrying the same entities; only if there is no such file does it fall back
+% to matching by acquisition time.
+
+cands = bids_list_runs(rawFmapDir, struct('sub', SUB, 'ses', SES, ...
+                                          'suffix', 'phasediff', 'prefix', ''));
+if isempty(cands)
+    error('run_spm_preproc:NoPhasediff', [ ...
+        'No phasediff in %s\n' ...
+        'PREPROC_MODE=realign_unwarp needs %s_%s[_run-N]_phasediff.nii[.gz]\n' ...
+        'plus its magnitude1.'], rawFmapDir, SUB, SES);
+end
+
+[phasediff, info] = bids_pick_run(cands, struct( ...
+    'label',      'phasediff', ...
+    'selected',   bids_selection_for(runSel, 'phasediff', 'fieldmap'), ...
+    'anchorSec',  anchor.secs, ...
+    'anchorName', anchor.name, ...
+    'gapSec',     CFG.RUN_MATCH_GAP_SEC, ...
+    'strict',     CFG.STRICT_RUN_MATCHING));
+fprintf('  phasediff %-9s %s\n', info.runLabel, info.reason);
+
+magFile = companion_file(phasediff, rawFmapDir, 'magnitude1', SUB, SES, CFG, runSel, anchor);
+assert(~isempty(magFile), [ ...
+    'Found the phasediff but no magnitude1 to unwrap it against.\n' ...
+    '  phasediff: %s\n' ...
+    '  Looked in: %s\n' ...
+    'SPM needs the magnitude acquired with this phase difference. If the\n' ...
+    'session has none, build a fieldmap from the T1w instead:\n' ...
+    '  bash make_fieldmaps.sh --sub %s --ses %s\n' ...
+    'then set PREPROC_MODE=precalc_fieldmap.'], phasediff, rawFmapDir, SUB, SES);
+end
+
+function [fieldmapFile, magFile] = select_precalc_fieldmap(rawFmapDir, derivFmapDir, SUB, SES, CFG, runSel, anchor)
+% SELECT_PRECALC_FIELDMAP  A ready-made B0 map and the magnitude it belongs to.
+%
+% make_fieldmaps.sh writes these into the fieldmaps derivative; older datasets
+% may still have them next to the raw fmap files, so both are searched.
+
+searchDirs = {derivFmapDir, rawFmapDir};
+
+fmPat  = CFG.FIELDMAP_PATTERN;            % '_fieldmap'
+magPat = CFG.FIELDMAP_MAGNITUDE_PATTERN;  % '_magnitude'
+
+cands = bids_list_runs(searchDirs, struct('sub', SUB, 'ses', SES, ...
+    'regexp', ['.*' regexptranslate('escape', fmPat) '\.nii(\.gz)?$'], 'prefix', ''));
+
+assert(~isempty(cands), [ ...
+    'No fieldmap found for %s / %s.\n' ...
+    '  Looked in: %s\n' ...
+    '             %s\n' ...
+    'Expected a file like %s_%s%s.nii[.gz]\n' ...
+    'Create one with:  bash make_fieldmaps.sh --sub %s --ses %s\n' ...
+    '(or point FIELDMAP_PATTERN at whatever your fieldmaps are called)'], ...
+    SUB, SES, derivFmapDir, rawFmapDir, SUB, SES, fmPat, SUB, SES);
+
+[fieldmapFile, info] = bids_pick_run(cands, struct( ...
+    'label',      'fieldmap', ...
+    'selected',   bids_selection_for(runSel, 'fieldmap'), ...
+    'anchorSec',  anchor.secs, ...
+    'anchorName', anchor.name, ...
+    'gapSec',     CFG.RUN_MATCH_GAP_SEC, ...
+    'strict',     CFG.STRICT_RUN_MATCHING));
+fprintf('  fieldmap %-10s %s\n', info.runLabel, info.reason);
+
+% The magnitude must be the one written next to this fieldmap: same entities,
+% same directory, same acquisition.
+fmDir  = fileparts(fieldmapFile);
+fmEnt  = bids_entities(fieldmapFile);
+fmStem = regexprep(fmEnt.stem, [regexptranslate('escape', fmPat) '$'], '');
+
+magCands = bids_list_runs(fmDir, struct( ...
+    'regexp', ['^' regexptranslate('escape', fmStem) regexptranslate('escape', magPat) '\.nii(\.gz)?$']));
+
+if isempty(magCands)
+    % Fall back to any magnitude for this session, matched by time
+    magCands = bids_list_runs(searchDirs, struct('sub', SUB, 'ses', SES, ...
+        'regexp', ['.*' regexptranslate('escape', magPat) '\.nii(\.gz)?$'], 'prefix', ''));
+end
+
+assert(~isempty(magCands), [ ...
+    'Found the fieldmap but not its magnitude image.\n' ...
+    '  Fieldmap: %s\n' ...
+    '  Expected: %s%s.nii[.gz] next to it\n' ...
+    'SPM needs a magnitude in the same space as the fieldmap to mask it and to\n' ...
+    'match the VDM to the EPI. make_fieldmaps.sh writes one beside every\n' ...
+    'fieldmap it creates.'], fieldmapFile, fmStem, magPat);
+
+[magFile, magInfo] = bids_pick_run(magCands, struct( ...
+    'label',      'fieldmap magnitude', ...
+    'selected',   bids_selection_for(runSel, 'magnitude'), ...
+    'anchorSec',  bids_acq_time(fieldmapFile), ...
+    'anchorName', 'the fieldmap', ...
+    'gapSec',     CFG.RUN_MATCH_GAP_SEC, ...
+    'strict',     false));
+fprintf('  magnitude %-9s %s\n', magInfo.runLabel, magInfo.reason);
+end
+
+function reverseFile = select_reverse_pe(RAW, SUB, SES, CFG, runSel, anchor)
+% SELECT_REVERSE_PE  The reverse phase-encode EPI topup estimates the field from.
+%
+% Which directory to search comes from TOPUP_REVERSE_PE_DIR, and what the file
+% is called from TOPUP_REVERSE_PE_PATTERN (a substring, so extra entities are
+% tolerated). Getting the run wrong here is the worst case of all: the field
+% would be estimated between EPIs from two different head positions.
+
+switch CFG.TOPUP_REVERSE_PE_DIR
+    case 'fmap', searchDirs = {RAW.fmap};
+    case 'func', searchDirs = {RAW.func};
+    case 'auto', searchDirs = {RAW.fmap, RAW.func};
+    otherwise
+        error('Invalid TOPUP_REVERSE_PE_DIR: %s (must be fmap, func, or auto)', ...
+              CFG.TOPUP_REVERSE_PE_DIR);
+end
+
+pattern = CFG.TOPUP_REVERSE_PE_PATTERN;
+cands = bids_list_runs(searchDirs, struct('sub', SUB, 'ses', SES, ...
+                                          'contains', pattern, 'prefix', ''));
+
+if isempty(cands)
+    % Same fallbacks as before: the usual names for a reverse-PE EPI
+    fallbacks = {'dir-[A-Za-z]+_epi', 'task-reverse.*_bold', 'task-reverse', '_epi'};
+    for f = 1:numel(fallbacks)
+        cands = bids_list_runs(searchDirs, struct('sub', SUB, 'ses', SES, ...
+                                                  'regexp', ['.*' fallbacks{f} '.*\.nii(\.gz)?$'], ...
+                                                  'prefix', ''));
+        if ~isempty(cands)
+            fprintf('  (matched via fallback pattern: %s)\n', fallbacks{f});
+            break;
+        end
+    end
+end
+
+assert(~isempty(cands), [ ...
+    'Could not find the reverse-PE EPI for %s / %s.\n' ...
+    '  Pattern:  %s\n' ...
+    '  Searched: %s\n' ...
+    '  TOPUP_REVERSE_PE_DIR: %s\n' ...
+    'Adjust TOPUP_REVERSE_PE_PATTERN in pipeline_config.cfg.'], ...
+    SUB, SES, pattern, strjoin(searchDirs, ', '), CFG.TOPUP_REVERSE_PE_DIR);
+
+[reverseFile, info] = bids_pick_run(cands, struct( ...
+    'label',      'reverse-PE EPI', ...
+    'selected',   bids_selection_for(runSel, 'reverse', 'task-reverse', 'epi'), ...
+    'anchorSec',  anchor.secs, ...
+    'anchorName', anchor.name, ...
+    'gapSec',     CFG.RUN_MATCH_GAP_SEC, ...
+    'strict',     CFG.STRICT_RUN_MATCHING));
+fprintf('  reverse  %-10s %s\n', info.runLabel, info.reason);
+end
+
+function [roiL, roiR, hasRoiL, hasRoiR] = find_rois(searchDirs, SUB, SES, CFG, runSel, anchor)
+% FIND_ROIS  Left and right ROI masks for this session.
+%
+% searchDirs are tried in order, so a mask imported into the derivatives by
+% move_rois.sh wins over one still sitting in the raw anat/ directory.
+%
+% ROI_PATTERN_LEFT/RIGHT are matched as a suffix, which leaves room for the
+% extra entities a multi-run session carries. When several masks match, the
+% one whose run entity was selected (or, failing that, whose T2w run was
+% chosen) is used — a mask drawn on run-1 of the T2w is meaningless on run-2.
 
 roiL = ''; roiR = ''; hasRoiL = false; hasRoiR = false;
 
 if ~CFG.DO_COREG_ROIS, return; end
 
-patL = CFG.ROI_PATTERN_LEFT;
-patR = CFG.ROI_PATTERN_RIGHT;
-
-% Strategy 1: exact match  sub_ses + pattern
-exact_L = fullfile(anatDir, [SUB '_' SES patL]);
-exact_R = fullfile(anatDir, [SUB '_' SES patR]);
-
-if isfile(exact_L)
-    roiL = exact_L; hasRoiL = true;
-else
-    % Strategy 2: substring match (handles extra entities)
-    escapedPat = regexptranslate('escape', patL);
-    hit = first_match(anatDir, ['^' regexptranslate('escape',SUB) '_' regexptranslate('escape',SES) '.*' escapedPat]);
-    if ~isempty(hit)
-        roiL = hit; hasRoiL = true;
-    end
+[roiL, hasRoiL] = pick_roi(searchDirs, SUB, SES, CFG.ROI_PATTERN_LEFT,  'left',  CFG, runSel, anchor);
+[roiR, hasRoiR] = pick_roi(searchDirs, SUB, SES, CFG.ROI_PATTERN_RIGHT, 'right', CFG, runSel, anchor);
 end
 
-if isfile(exact_R)
-    roiR = exact_R; hasRoiR = true;
-else
-    escapedPat = regexptranslate('escape', patR);
-    hit = first_match(anatDir, ['^' regexptranslate('escape',SUB) '_' regexptranslate('escape',SES) '.*' escapedPat]);
-    if ~isempty(hit)
-        roiR = hit; hasRoiR = true;
-    end
+function [roiFile, found] = pick_roi(searchDirs, SUB, SES, pattern, side, CFG, runSel, anchor)
+roiFile = ''; found = false;
+if isempty(pattern), return; end
+
+escPat = regexptranslate('escape', pattern);
+
+for d = 1:numel(searchDirs)
+    cands = bids_list_runs(searchDirs{d}, struct('sub', SUB, 'ses', SES, ...
+        'regexp', ['.*' escPat '(\.gz)?$'], 'prefix', ''));
+    if isempty(cands), continue; end
+
+    [roiFile, info] = bids_pick_run(cands, struct( ...
+        'label',      sprintf('%s ROI mask', side), ...
+        'selected',   bids_selection_for(runSel, ['roi-' side], 'roi', 'T2w'), ...
+        'anchorSec',  anchor.secs, ...
+        'anchorName', anchor.name, ...
+        'gapSec',     CFG.RUN_MATCH_GAP_SEC, ...
+        'strict',     false));   % a missing sidecar is normal for a hand-drawn mask
+    found = true;
+    fprintf('  ROI %-5s %-10s %s\n', side, info.runLabel, info.reason);
+    return;
 end
 end
 
-function boldFile = find_bold(funcDir, SUB, SES, tLabel, runSel)
-% FIND_BOLD  Find BOLD file for a task label, handling multi-run and .nii.gz.
+function out = companion_file(refFile, folder, suffix, SUB, SES, CFG, runSel, anchor)
+% COMPANION_FILE  The file acquired with refFile, by entities first, time second.
 %
-% Looks for: sub-XX_ses-YY_task-<tLabel>[_run-N]_bold.nii[.gz]
-% If multiple runs, uses run_selection or defaults to last run.
+% Used for magnitude/phasediff pairs, where "the same session" is not good
+% enough: they have to be the same acquisition.
 
-% Try exact match first (no run entity)
-exact = fullfile(funcDir, sprintf('%s_%s_task-%s_bold.nii', SUB, SES, tLabel));
-if isfile(exact)
-    boldFile = exact;
-    return;
-end
-% Try .nii.gz
-exact_gz = [exact '.gz'];
-if isfile(exact_gz)
-    boldFile = exact_gz;
-    return;
-end
+out = '';
+refEnt = bids_entities(refFile);
 
-% Search with flexible regex: sub_ses_task-<label>[_anything]_bold.nii[.gz]
-escLabel = regexptranslate('escape', tLabel);
-pattern = ['^' regexptranslate('escape',SUB) '_' regexptranslate('escape',SES) '_task-' escLabel '(_[^/]*)?' '_bold\.nii'];
-allBold = all_matches(funcDir, pattern);
+% Same run entity as the reference — this is the reliable case
+sameRun = bids_list_runs(folder, struct('sub', SUB, 'ses', SES, ...
+                                        'suffix', suffix, 'prefix', ''));
+if isempty(sameRun), return; end
 
-if isempty(allBold)
-    % Also try without strict anchoring (handles unexpected prefixes)
-    pattern2 = ['task-' escLabel '.*_bold\.nii'];
-    allBold = all_matches(funcDir, pattern2);
-end
-
-assert(~isempty(allBold), 'Cannot find BOLD for task-%s in %s', tLabel, funcDir);
-
-if numel(allBold) == 1
-    boldFile = allBold{1};
-    return;
-end
-
-% Multiple runs found — check run selection
-selKey = ['task_' tLabel];
-if isfield(runSel, selKey) && ~isempty(runSel.(selKey))
-    selRun = runSel.(selKey);
-    for i = 1:numel(allBold)
-        [~, fname] = fileparts(allBold{i});
-        if contains(fname, selRun)
-            boldFile = allBold{i};
-            fprintf('  BOLD task-%s: using selected %s (from run_selection.tsv)\n', tLabel, selRun);
-            return;
-        end
+for i = 1:numel(sameRun)
+    if strcmp(sameRun(i).ent.run, refEnt.run)
+        out = sameRun(i).path;
+        return;
     end
-    warning('run_selection.tsv specifies %s for task-%s but no match found. Using last run.', selRun, tLabel);
 end
 
-% Default: sort and take last (highest run number)
-allBold = sort(allBold);
-boldFile = allBold{end};
-fprintf('  BOLD task-%s: multiple runs (%d), using last: %s\n', tLabel, numel(allBold), boldFile);
+% No entity match: fall back to whichever was acquired closest to it
+[out, info] = bids_pick_run(sameRun, struct( ...
+    'label',      suffix, ...
+    'selected',   bids_selection_for(runSel, suffix), ...
+    'anchorSec',  bids_acq_time(refFile), ...
+    'anchorName', refEnt.suffix, ...
+    'gapSec',     CFG.RUN_MATCH_GAP_SEC, ...
+    'strict',     false, ...
+    'required',   false));
+if ~isempty(out)
+    fprintf('  %-9s %-10s %s\n', suffix, info.runLabel, info.reason);
 end
+end
+
+function write_run_manifest(DER, SUB, SES, CFG, boldPicks, others, anchor)
+% WRITE_RUN_MANIFEST  Record which run of each scan this session used.
+%
+% Written as <ses>/preproc_run_selection.tsv. Two readers need it:
+%   - prepare_gridcat_directory.m, to pair each task with its event table even
+%     when the event file's name says nothing about runs;
+%   - you, six months later, when a session looks odd and the question is
+%     which T2w it was coregistered to.
+%
+% Rows are merged, not replaced. Running the coreg stage on its own decides
+% the T2w and the ROI masks but nothing about the BOLD, and the record of
+% which BOLD run the realignment used has to survive that.
+
+outFile = fullfile(DER.sesDir, 'preproc_run_selection.tsv');
+
+rows = read_existing_manifest(outFile);
+
+for i = 1:numel(boldPicks)
+    if isempty(boldPicks(i).path), continue; end
+    key = ['task-' boldPicks(i).label];
+    rows.(matlab.lang.makeValidName(key)) = sprintf('%s\t%s\t%s\t%s\t%s\t%s\t%s', ...
+        SUB, SES, key, boldPicks(i).runLabel, clock_of(boldPicks(i).acqSec), ...
+        boldPicks(i).path, boldPicks(i).reason);
+end
+
+types = fieldnames(others);
+for i = 1:numel(types)
+    f = others.(types{i});
+    if isempty(f), continue; end
+    ent = bids_entities(f);
+    runLabel = ent.run;
+    if isempty(runLabel), runLabel = 'no-run'; end
+    key = strrep(types{i}, '_', '-');
+    rows.(matlab.lang.makeValidName(key)) = sprintf('%s\t%s\t%s\t%s\t%s\t%s\t%s', ...
+        SUB, SES, key, runLabel, clock_of(bids_acq_time(f)), f, ...
+        'matched to the functional runs');
+end
+
+fid = fopen(outFile, 'w');
+if fid < 0
+    warning('run_spm_preproc:ManifestFailed', 'Could not write %s', outFile);
+    return;
+end
+cleanupFid = onCleanup(@() fclose(fid)); %#ok<NASGU>
+
+fprintf(fid, 'subject\tsession\ttype\tselected_run\tacq_time\tsource_file\treason\n');
+keys = sort(fieldnames(rows));
+for i = 1:numel(keys)
+    fprintf(fid, '%s\n', rows.(keys{i}));
+end
+fprintf(fid, '#\tanchor\t%s\t%s\tgap=%gmin\tstrict=%d\t\n', ...
+    anchor.name, clock_of(anchor.sec), CFG.RUN_MATCH_GAP_SEC/60, CFG.STRICT_RUN_MATCHING);
+
+fprintf('Run selection written to: %s\n', outFile);
+end
+
+function rows = read_existing_manifest(outFile)
+% READ_EXISTING_MANIFEST  Previous rows, keyed by type, so they can be kept.
+rows = struct();
+if ~isfile(outFile), return; end
+
+fid = fopen(outFile, 'r');
+if fid == -1, return; end
+cleanupFid = onCleanup(@() fclose(fid)); %#ok<NASGU>
+
+lineNo = 0;
+while ~feof(fid)
+    line = fgetl(fid);
+    if ~ischar(line), break; end
+    lineNo = lineNo + 1;
+    if lineNo == 1, continue; end                    % header
+    if isempty(strtrim(line)), continue; end
+    if line(1) == '#', continue; end                 % the anchor footer
+
+    parts = strsplit(line, sprintf('\t'));
+    if numel(parts) < 3, continue; end
+    key = matlab.lang.makeValidName(strtrim(parts{3}));
+    rows.(key) = line;
+end
+end
+
+function s = clock_of(sec)
+if isnan(sec)
+    s = 'unknown';
+else
+    s = sprintf('%02d:%02d:%02d', floor(sec/3600), floor(mod(sec,3600)/60), floor(mod(sec,60)));
+end
+end
+
+function doReset = deriv_reset_wanted(CFG, STAGES)
+% DERIV_RESET_WANTED  Should this run start from an empty derivatives folder?
+%
+% Only a run that redoes the preprocessing from its beginning may clear the
+% previous output. A resumed run (realign,coreg,smooth and friends) reads that
+% output back, so wiping it would delete its own input.
+
+switch CFG.DERIV_RESET
+    case {'never', 'false', 'no', '0'}
+        doReset = false;
+        return;
+    case {'always', 'true', 'yes', '1'}
+        doReset = true;
+        return;
+end
+
+% 'auto': the first stage this mode actually performs is the from-scratch mark
+switch CFG.PREPROC_MODE
+    case 'topup',                          entry = 'topup';
+    case {'realign_unwarp','precalc_fieldmap'}, entry = 'vdm';
+    otherwise,                             entry = 'realign';
+end
+doReset = STAGES.(entry);
+end
+
+function v = cfg_flag(cfgRaw, key, default)
+% CFG_FLAG  Read a true/false setting out of the config.
+v = default;
+if ~isfield(cfgRaw, key), return; end
+raw = cfgRaw.(key);
+if isempty(raw), return; end
+if isnumeric(raw)
+    v = raw ~= 0;
+    return;
+end
+v = ismember(lower(strtrim(char(raw))), {'true', 'yes', '1', 'on'});
+end
+
+function out = tern(cond, a, b)
+if cond, out = a; else, out = b; end
+end
+
+
 
 function vols = expand_4d(niiFile)
 V = spm_vol(niiFile);
@@ -763,9 +1203,9 @@ end
 
 %
 
-function vdm_out = calc_vdm_for_run_to_func(phasemap, magnitude1, epiRef, funcDir, fmapDir, CFG, taskN)
+function vdm_out = calc_vdm_for_run_to_func(phasemap, magnitude1, epiRef, funcDir, fmapDir, CFG, taskLabel)
 % Calculates a VDM matched to epiRef and ensures output ends up in funcDir
-% as a deterministic name: vdm_task-<N>.nii
+% as a deterministic name: vdm_task-<label>.nii
 %
 % Robust strategy:
 % - Don't trust vdmflags.prefix (SPM/FieldMap sometimes ignores or overrides it)
@@ -802,7 +1242,7 @@ matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.
 matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.reg = 0.02;
 
 matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.matchvdm      = 1;  % write VDM matched to epiRef
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.sessname      = sprintf('task-%d', taskN);
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.sessname      = sprintf('task-%s', taskLabel);
 matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.writeunwarped = 0;
 
 % These avoid "incomplete module inputs" errors on some installs
@@ -826,20 +1266,20 @@ spm_jobman('run', matlabbatch);
 after = list_vdm_candidates([vdmSearchDirs, {pwd}]);
 newFiles = diff_vdm_candidates(before, after);
 
-assert(~isempty(newFiles), 'VDM not found after FieldMap run for task-%d. Check where FieldMap writes outputs.', taskN);
+assert(~isempty(newFiles), 'VDM not found after FieldMap run for task-%s. Check where FieldMap writes outputs.', taskLabel);
 
 % If multiple candidates were created, take the newest one
 newest = pick_newest_file(newFiles);
 
 % ---- Move/rename deterministically into funcDir ----
-vdm_out = fullfile(funcDir, sprintf('vdm_task-%d.nii', taskN));
+vdm_out = fullfile(funcDir, sprintf('vdm_task-%s.nii', taskLabel));
 
 % If output is .img/.hdr pair, convert handling:
 [~,~,ext] = fileparts(newest);
 if strcmpi(ext,'.img')
     % Move both .img and .hdr, but keep .img name; SPM can read Analyze too.
-    target_img = fullfile(funcDir, sprintf('vdm_task-%d.img', taskN));
-    target_hdr = fullfile(funcDir, sprintf('vdm_task-%d.hdr', taskN));
+    target_img = fullfile(funcDir, sprintf('vdm_task-%s.img', taskLabel));
+    target_hdr = fullfile(funcDir, sprintf('vdm_task-%s.hdr', taskLabel));
     if isfile(target_img), delete(target_img); end
     if isfile(target_hdr), delete(target_hdr); end
     movefile(newest, target_img);
@@ -1093,74 +1533,6 @@ end
 
 % ================= PRECALCULATED FIELDMAP HELPERS =================
 
-function [fieldmapFile, magFile] = find_precalc_fieldmap(fmapDir, SUB, SES, CFG, runSel)
-% FIND_PRECALC_FIELDMAP  Locate a ready-made B0 fieldmap and its magnitude.
-%
-% Looks for the BIDS "Case 3" pair that make_fieldmaps.sh writes:
-%   fmap/<sub>_<ses>[_run-N]_fieldmap.nii[.gz]
-%   fmap/<sub>_<ses>[_run-N]_magnitude.nii[.gz]
-%
-% When several runs exist, run_selection.tsv decides (key: fieldmap); otherwise
-% the last one in sorted order is used, matching how find_t2w picks a T2w.
-
-fmPat  = regexptranslate('escape', CFG.FIELDMAP_PATTERN);
-magPat = regexptranslate('escape', CFG.FIELDMAP_MAGNITUDE_PATTERN);
-stem   = ['^' regexptranslate('escape',SUB) '_' regexptranslate('escape',SES)];
-
-candidates = all_matches(fmapDir, [stem '.*' fmPat '\.nii(\.gz)?$']);
-assert(~isempty(candidates), [ ...
-    'No fieldmap found in %s\n' ...
-    'Expected a file like %s_%s%s.nii[.gz]\n' ...
-    'Create one with:  bash make_fieldmaps.sh --sub %s --ses %s\n' ...
-    '(or point FIELDMAP_PATTERN at whatever your fieldmaps are called)'], ...
-    fmapDir, SUB, SES, CFG.FIELDMAP_PATTERN, SUB, SES);
-
-candidates = sort(candidates);
-if numel(candidates) == 1
-    fieldmapFile = candidates{1};
-else
-    fieldmapFile = '';
-    if isfield(runSel, 'fieldmap') && ~isempty(runSel.fieldmap)
-        for i = 1:numel(candidates)
-            [~, fname] = fileparts(candidates{i});
-            if contains(fname, runSel.fieldmap)
-                fieldmapFile = candidates{i};
-                fprintf('  Fieldmap: using selected %s (from run_selection.tsv)\n', runSel.fieldmap);
-                break;
-            end
-        end
-    end
-    if isempty(fieldmapFile)
-        fieldmapFile = candidates{end};
-        fprintf('  Fieldmap: multiple runs found (%d), using last: %s\n', ...
-                numel(candidates), fieldmapFile);
-    end
-end
-
-% The magnitude should carry the same BIDS entities as the fieldmap
-[~, fmName] = fileparts(regexprep(fieldmapFile, '\.gz$', ''));
-fmStem = regexprep(fmName, [fmPat '$'], '');
-
-magCandidates = all_matches(fmapDir, ...
-    ['^' regexptranslate('escape', fmStem) magPat '\.nii(\.gz)?$']);
-if isempty(magCandidates)
-    % Fall back to any magnitude for this session
-    magCandidates = all_matches(fmapDir, [stem '.*' magPat '\.nii(\.gz)?$']);
-end
-
-assert(~isempty(magCandidates), [ ...
-    'Found the fieldmap but not its magnitude image in %s\n' ...
-    '  Fieldmap: %s\n' ...
-    '  Expected: %s%s.nii[.gz]\n' ...
-    'SPM needs a magnitude in the same space as the fieldmap to mask and to\n' ...
-    'match the VDM to the EPI. make_fieldmaps.sh writes one next to each\n' ...
-    'fieldmap it creates.'], ...
-    fmapDir, fieldmapFile, fmStem, CFG.FIELDMAP_MAGNITUDE_PATTERN);
-
-magCandidates = sort(magCandidates);
-magFile = magCandidates{end};
-end
-
 function hzFile = fieldmap_to_hz(fieldmapFile, funcDir, CFG)
 % FIELDMAP_TO_HZ  Write a copy of the fieldmap in Hz for SPM's FieldMap toolbox.
 %
@@ -1198,7 +1570,7 @@ Vout.descrip = 'B0 fieldmap in Hz (for SPM FieldMap)';
 spm_write_vol(Vout, dat);
 end
 
-function vdm_out = calc_vdm_from_fieldmap(fieldmapHz, magFile, epiRef, funcDir, fmapDir, CFG, taskN)
+function vdm_out = calc_vdm_from_fieldmap(fieldmapHz, magFile, epiRef, funcDir, fmapDir, CFG, taskLabel)
 % CALC_VDM_FROM_FIELDMAP  Build a VDM from a precalculated fieldmap (in Hz).
 %
 % Uses SPM's FieldMap toolbox "Precalculated FieldMap" input, so SPM performs
@@ -1206,7 +1578,7 @@ function vdm_out = calc_vdm_from_fieldmap(fieldmapHz, magFile, epiRef, funcDir, 
 % (tert) and BLIP_DIRECTION, and matches the VDM to this run's EPI geometry.
 %
 % Same output contract as calc_vdm_for_run_to_func: the VDM ends up in funcDir
-% as vdm_task-<N>.nii, found by diffing the vdm* files before and after the run.
+% as vdm_task-<label>.nii, found by diffing the vdm* files before and after.
 
 % ---- Snapshot existing VDM candidates (before) ----
 vdmSearchDirs = {funcDir, fmapDir, pwd};
@@ -1241,7 +1613,7 @@ matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.
 matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.reg = 0.02;
 
 matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.matchvdm      = 1;  % write VDM matched to epiRef
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.sessname      = sprintf('task-%d', taskN);
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.sessname      = sprintf('task-%s', taskLabel);
 matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.writeunwarped = 0;
 matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.anat          = {''};
 matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.matchanat     = 0;
@@ -1259,19 +1631,19 @@ after = list_vdm_candidates([vdmSearchDirs, {pwd}]);
 newFiles = diff_vdm_candidates(before, after);
 
 assert(~isempty(newFiles), [ ...
-    'VDM not found after FieldMap run for task-%d.\n' ...
+    'VDM not found after FieldMap run for task-%s.\n' ...
     'Check where SPM FieldMap wrote its output (looked in %s, %s).'], ...
-    taskN, funcDir, fmapDir);
+    taskLabel, funcDir, fmapDir);
 
 newest = pick_newest_file(newFiles);
 
 % ---- Move/rename deterministically into funcDir ----
-vdm_out = fullfile(funcDir, sprintf('vdm_task-%d.nii', taskN));
+vdm_out = fullfile(funcDir, sprintf('vdm_task-%s.nii', taskLabel));
 
 [~,~,ext] = fileparts(newest);
 if strcmpi(ext,'.img')
-    target_img = fullfile(funcDir, sprintf('vdm_task-%d.img', taskN));
-    target_hdr = fullfile(funcDir, sprintf('vdm_task-%d.hdr', taskN));
+    target_img = fullfile(funcDir, sprintf('vdm_task-%s.img', taskLabel));
+    target_hdr = fullfile(funcDir, sprintf('vdm_task-%s.hdr', taskLabel));
     if isfile(target_img), delete(target_img); end
     if isfile(target_hdr), delete(target_hdr); end
     movefile(newest, target_img);
@@ -1287,125 +1659,6 @@ fprintf('Renamed VDM -> %s\n', vdm_out);
 end
 
 % ===================== FSL TOPUP HELPER FUNCTIONS =====================
-
-function reversePE_epi = find_reverse_pe_epi(subDir, SUB, SES, CFG, runSel)
-% FIND_REVERSE_PE_EPI  Locate the reverse phase-encode EPI for topup.
-%
-% Searches fmap/ and/or func/ depending on TOPUP_REVERSE_PE_DIR setting.
-% Uses flexible matching: the TOPUP_REVERSE_PE_PATTERN is treated as a
-% substring that must appear somewhere in the NIfTI filename.  Extra BIDS
-% entities (acq-*, run-*, etc.) between specifiers are tolerated.
-% If multiple matches are found, run_selection.tsv is consulted.
-%
-% Search strategy per directory:
-%   1) Exact BIDS name: <SUB>_<SES>_<pattern>.nii (with optional .gz)
-%   2) Substring match: any .nii file whose name contains <pattern>
-%   3) Broad fallback:  common reverse-PE names (dir-*_epi, task-reverse)
-
-pattern = CFG.TOPUP_REVERSE_PE_PATTERN;
-searchDir = CFG.TOPUP_REVERSE_PE_DIR;
-
-fmapDir = fullfile(subDir, 'fmap');
-funcDir = fullfile(subDir, 'func');
-
-% Build ordered list of directories to search
-switch searchDir
-    case 'fmap'
-        searchDirs = {fmapDir};
-    case 'func'
-        searchDirs = {funcDir};
-    case 'auto'
-        searchDirs = {};
-        if isfolder(fmapDir), searchDirs{end+1} = fmapDir; end
-        searchDirs{end+1} = funcDir;
-    otherwise
-        error('Invalid TOPUP_REVERSE_PE_DIR: %s (must be fmap, func, or auto)', searchDir);
-end
-
-% Collect all candidates across all search directories
-allCandidates = {};
-
-for di = 1:numel(searchDirs)
-    d = searchDirs{di};
-    if ~isfolder(d), continue; end
-
-    % Strategy 1: exact BIDS name  <SUB>_<SES>_<pattern>.nii[.gz]
-    candidate = fullfile(d, sprintf('%s_%s_%s.nii', SUB, SES, pattern));
-    if isfile(candidate)
-        allCandidates{end+1} = candidate; %#ok<AGROW>
-    end
-    candidate_gz = [candidate '.gz'];
-    if isfile(candidate_gz)
-        allCandidates{end+1} = candidate_gz; %#ok<AGROW>
-    end
-
-    % Strategy 2: substring match
-    escapedPat = regexptranslate('escape', pattern);
-    hits = all_matches(d, ['.*' escapedPat '.*\.nii']);
-    for hi = 1:numel(hits)
-        if ~any(strcmp(hits{hi}, allCandidates))
-            allCandidates{end+1} = hits{hi}; %#ok<AGROW>
-        end
-    end
-end
-
-% Broad fallback if nothing found
-if isempty(allCandidates)
-    fallbackPatterns = { ...
-        '.*dir-[A-Za-z]+_epi.*\.nii',    ...
-        '.*task-reverse.*bold.*\.nii',    ...
-        '.*task-reverse.*\.nii',          ...
-        '.*_epi\.nii'                     ...
-    };
-    for di = 1:numel(searchDirs)
-        d = searchDirs{di};
-        if ~isfolder(d), continue; end
-        for fi = 1:numel(fallbackPatterns)
-            hits = all_matches(d, fallbackPatterns{fi});
-            for hi = 1:numel(hits)
-                if ~any(strcmp(hits{hi}, allCandidates))
-                    allCandidates{end+1} = hits{hi}; %#ok<AGROW>
-                    fprintf('  (matched via fallback pattern: %s)\n', fallbackPatterns{fi});
-                end
-            end
-        end
-    end
-end
-
-if isempty(allCandidates)
-    searchedStr = strjoin(searchDirs, ', ');
-    error(['Could not find reverse-PE EPI.\n' ...
-           '  Pattern: %s\n' ...
-           '  Searched: %s\n' ...
-           '  TOPUP_REVERSE_PE_DIR: %s\n' ...
-           '  Try adjusting TOPUP_REVERSE_PE_PATTERN in pipeline_config.cfg'], ...
-           pattern, searchedStr, searchDir);
-end
-
-if numel(allCandidates) == 1
-    reversePE_epi = allCandidates{1};
-    return;
-end
-
-% Multiple candidates — check run_selection
-if isfield(runSel, 'task_reverse') && ~isempty(runSel.task_reverse)
-    selRun = runSel.task_reverse;
-    for i = 1:numel(allCandidates)
-        [~, fname] = fileparts(allCandidates{i});
-        if contains(fname, selRun)
-            reversePE_epi = allCandidates{i};
-            fprintf('  Reverse-PE: using selected %s (from run_selection.tsv)\n', selRun);
-            return;
-        end
-    end
-    warning('run_selection.tsv specifies %s for reverse-PE but no match. Using first.', selRun);
-end
-
-% Default: use the first match
-allCandidates = sort(allCandidates);
-reversePE_epi = allCandidates{1};
-fprintf('  Reverse-PE: multiple found (%d), using first: %s\n', numel(allCandidates), reversePE_epi);
-end
 
 function run_fsl_topup(boldFile, reversePE_epi, topupPrefix, CFG)
 % RUN_FSL_TOPUP  Estimate distortion field using FSL topup.
@@ -1517,7 +1770,7 @@ assert(isfile(outputFile), 'applytopup output not found: %s (checked %s too)', o
 fprintf('  applytopup complete -> %s\n', outputFile);
 end
 
-function vdm_out = convert_topup_to_vdm(topupPrefix, epiRef, funcDir, CFG, taskN)
+function vdm_out = convert_topup_to_vdm(topupPrefix, epiRef, funcDir, CFG, taskLabel)
 % CONVERT_TOPUP_TO_VDM  Convert FSL topup field to SPM-compatible VDM.
 %
 % The topup field (in Hz) is converted to a voxel displacement map (in mm)
@@ -1533,7 +1786,7 @@ end
 assert(isfile(fieldFile), 'Topup field not found: %s_field.nii[.gz]', topupPrefix);
 
 % Convert to .nii for SPM (FSL defaults to .nii.gz)
-fieldNii = fullfile(funcDir, sprintf('topup_field_task-%d.nii', taskN));
+fieldNii = fullfile(funcDir, sprintf('topup_field_task-%s.nii', taskLabel));
 fieldNiiGz = [fieldNii '.gz'];
 cmd = sprintf('fslmaths %s %s -odt float', fieldFile, fieldNiiGz);
 run_shell(cmd);
@@ -1583,7 +1836,7 @@ if endsWith(peDir, '-')
 end
 
 % Write VDM using field header (same geometry)
-vdm_out = fullfile(funcDir, sprintf('vdm_task-%d.nii', taskN));
+vdm_out = fullfile(funcDir, sprintf('vdm_task-%s.nii', taskLabel));
 Vout = Vfield;
 Vout.fname = vdm_out;
 Vout.dt = [spm_type('float32') 0];
@@ -1629,78 +1882,40 @@ if status ~= 0
 end
 end
 
-function niiFile = ensure_nii(inputFile)
-% ENSURE_NII  Decompress .nii.gz to .nii if needed. Returns .nii path.
-%
-% SPM cannot read compressed NIfTI files. This function checks if the
-% input is .nii.gz, decompresses it in-place using gunzip, and returns
-% the path to the uncompressed .nii file.
-%
-% If the input is already .nii, it is returned unchanged.
-% If a .nii already exists alongside the .nii.gz, the .nii is returned.
-
-if isempty(inputFile)
-    niiFile = inputFile;
-    return;
-end
-
-% Check if it's .nii.gz
-if endsWith(inputFile, '.nii.gz')
-    niiFile = inputFile(1:end-3);  % strip .gz
-    if isfile(niiFile)
-        fprintf('  [ensure_nii] Already decompressed: %s\n', niiFile);
-        return;
-    end
-    fprintf('  [ensure_nii] Decompressing: %s\n', inputFile);
-    gunzip(inputFile);
-    assert(isfile(niiFile), 'Decompression failed: %s not created', niiFile);
-else
-    niiFile = inputFile;
-end
-end
-
 % ===================== BIDS JSON VALIDATION =====================
 
-function validate_bids_params(funcDir, fmapDir, SUB, SES, CFG)
-% VALIDATE_BIDS_PARAMS  Compare pipeline config against BIDS JSON sidecars.
+function validate_bids_params(boldFiles, reverseFile, phasediffFile, fieldmapFile, CFG)
+% VALIDATE_BIDS_PARAMS  Compare the config against the sidecars of the files
+% this run actually chose.
 %
-% Reads JSON sidecar files from the BIDS dataset and compares key
-% acquisition parameters against the values in pipeline_config.cfg.
-% Prints warnings for any mismatches. Does NOT stop the pipeline —
-% the config values are always used (in case the user intentionally
-% overrides the BIDS values).
+% The files are the staged copies in the derivatives, and their JSON sidecars
+% came along with them. Checking those rather than "whichever sidecar turns up
+% first in the folder" matters as soon as a session has several runs: the run
+% being preprocessed is the one whose acquisition parameters have to match the
+% config, and a mismatch used to hide behind another run's sidecar.
+%
+% Nothing here stops the pipeline. The config values are always the ones used,
+% because they are sometimes deliberate overrides.
 
-fprintf('\n--- Validating config against BIDS JSON sidecars ---\n');
+fprintf('\n--- Validating config against the BIDS JSON sidecars ---\n');
 nWarnings = 0;
 
-% --- Find a task BOLD JSON to validate TR, PE direction, readout ---
-tLabel = CFG.TASK_LABELS{1};
-boldJsonPatterns = {
-    fullfile(funcDir, sprintf('%s_%s_task-%s_bold.json', SUB, SES, tLabel))
-    fullfile(funcDir, sprintf('%s_%s_task-%s_run-1_bold.json', SUB, SES, tLabel))
-};
+% --- The BOLD run being preprocessed ---
 boldJson = '';
-for i = 1:numel(boldJsonPatterns)
-    if isfile(boldJsonPatterns{i})
-        boldJson = boldJsonPatterns{i};
+for i = 1:numel(boldFiles)
+    if isempty(boldFiles{i}), continue; end
+    cand = regexprep(boldFiles{i}, '\.nii(\.gz)?$', '.json');
+    if isfile(cand)
+        boldJson = cand;
         break;
     end
 end
-% Fallback: any task BOLD JSON
-if isempty(boldJson)
-    hits = dir(fullfile(funcDir, sprintf('%s_%s_task-*_bold.json', SUB, SES)));
-    hits = hits(~startsWith({hits.name}, '._'));
-    if ~isempty(hits)
-        boldJson = fullfile(funcDir, hits(1).name);
-    end
-end
 
-% Initialize PE variables for use in both BOLD and reverse-PE validation
 bidsPE = '';
 bidsPE_hasSign = false;
 
 if ~isempty(boldJson)
-    bj = read_json(boldJson);
+    bj = read_json_file(boldJson);
     fprintf('  BOLD JSON: %s\n', boldJson);
 
     % -- TR --
@@ -1719,8 +1934,6 @@ if ~isempty(boldJson)
     %   PhaseEncodingDirection = full direction with sign (i, i-, j, j-, k, k-)
     %   PhaseEncodingAxis      = axis only, no sign (i, j, k)
     % We use Direction if available, otherwise fall back to Axis.
-    bidsPE = '';
-    bidsPE_hasSign = false;
     if isfield(bj, 'PhaseEncodingDirection') && ~isempty(bj.PhaseEncodingDirection)
         bidsPE = bj.PhaseEncodingDirection;
         bidsPE_hasSign = true;
@@ -1733,10 +1946,8 @@ if ~isempty(boldJson)
         bidsAxis = regexprep(fslPE, '-$', '');
 
         if strcmp(CFG.PREPROC_MODE, 'topup') && ~isempty(fslPE)
-            % Extract just the axis letter for axis-only comparison
             configAxis = regexprep(CFG.TOPUP_PE_DIR_BOLD, '-$', '');  % 'y-' -> 'y'
             if bidsPE_hasSign
-                % Full direction available — exact match
                 if ~strcmp(fslPE, CFG.TOPUP_PE_DIR_BOLD)
                     fprintf('  WARNING: PE direction mismatch — config TOPUP_PE_DIR_BOLD: %s, BIDS JSON: %s (=%s in FSL)\n', ...
                         CFG.TOPUP_PE_DIR_BOLD, bidsPE, fslPE);
@@ -1745,7 +1956,6 @@ if ~isempty(boldJson)
                     fprintf('  PE direction (BOLD): %s = %s in FSL (matches)\n', bidsPE, fslPE);
                 end
             else
-                % Only axis available — check axis matches, warn about sign
                 if ~strcmp(bidsAxis, configAxis)
                     fprintf('  WARNING: PE axis mismatch — config TOPUP_PE_DIR_BOLD axis: %s, BIDS JSON: %s (=%s in FSL)\n', ...
                         configAxis, bidsPE, bidsAxis);
@@ -1821,42 +2031,14 @@ else
     fprintf('  No BOLD JSON sidecar found — skipping BOLD parameter validation.\n');
 end
 
-% --- Validate reverse-PE JSON for topup ---
-if strcmp(CFG.PREPROC_MODE, 'topup')
-    revPattern = CFG.TOPUP_REVERSE_PE_PATTERN;
-    revJson = '';
-    % Try common locations
-    candidates = {};
-    if isfolder(funcDir)
-        hits = dir(fullfile(funcDir, ['*' revPattern '*.json']));
-        for i = 1:numel(hits)
-            candidates{end+1} = fullfile(funcDir, hits(i).name); %#ok<AGROW>
-        end
-    end
-    if isfolder(fmapDir)
-        hits = dir(fullfile(fmapDir, ['*' revPattern '*.json']));
-        for i = 1:numel(hits)
-            candidates{end+1} = fullfile(fmapDir, hits(i).name); %#ok<AGROW>
-        end
-    end
-    % Also try standard naming
-    stdCandidates = {
-        fullfile(funcDir, sprintf('%s_%s_%s.json', SUB, SES, revPattern))
-    };
-    for i = 1:numel(stdCandidates)
-        if isfile(stdCandidates{i})
-            candidates{end+1} = stdCandidates{i}; %#ok<AGROW>
-        end
-    end
-    if ~isempty(candidates)
-        revJson = candidates{1};
-    end
+% --- The reverse-PE EPI topup was given ---
+if strcmp(CFG.PREPROC_MODE, 'topup') && ~isempty(reverseFile)
+    revJson = regexprep(reverseFile, '\.nii(\.gz)?$', '.json');
 
-    if ~isempty(revJson)
-        rj = read_json(revJson);
+    if isfile(revJson)
+        rj = read_json_file(revJson);
         fprintf('  Reverse-PE JSON: %s\n', revJson);
 
-        % Check reverse PE direction
         revPE = '';
         revPE_hasSign = false;
         if isfield(rj, 'PhaseEncodingDirection') && ~isempty(rj.PhaseEncodingDirection)
@@ -1872,7 +2054,6 @@ if strcmp(CFG.PREPROC_MODE, 'topup')
             bidsRevAxis = regexprep(fslRevPE, '-$', '');
 
             if revPE_hasSign
-                % Full direction — exact match
                 if ~isempty(fslRevPE) && ~strcmp(fslRevPE, CFG.TOPUP_PE_DIR_REVERSE)
                     fprintf('  WARNING: Reverse PE direction mismatch — config: %s, BIDS JSON: %s (=%s in FSL)\n', ...
                         CFG.TOPUP_PE_DIR_REVERSE, revPE, fslRevPE);
@@ -1881,7 +2062,6 @@ if strcmp(CFG.PREPROC_MODE, 'topup')
                     fprintf('  PE direction (reverse): %s = %s in FSL (matches)\n', revPE, fslRevPE);
                 end
             else
-                % Axis only — check axis matches
                 if ~strcmp(bidsRevAxis, configRevAxis)
                     fprintf('  WARNING: Reverse PE axis mismatch — config axis: %s, BIDS JSON: %s (=%s in FSL)\n', ...
                         configRevAxis, revPE, bidsRevAxis);
@@ -1892,7 +2072,7 @@ if strcmp(CFG.PREPROC_MODE, 'topup')
             end
         end
 
-        % Validate PE vectors are opposite (only possible with signed directions)
+        % Forward and reverse must be opposite, or topup has nothing to work with
         if bidsPE_hasSign && revPE_hasSign && ~isempty(bidsPE) && ~isempty(revPE)
             fwdVec = pe_dir_to_vector(bids_pe_to_fsl(bidsPE));
             revVec = pe_dir_to_vector(bids_pe_to_fsl(revPE));
@@ -1904,8 +2084,7 @@ if strcmp(CFG.PREPROC_MODE, 'topup')
             else
                 fprintf('  Forward/reverse PE vectors are opposite (OK)\n');
             end
-        elseif ~isempty(bidsPE) && ~isempty(revPE) && ~(bidsPE_hasSign && revPE_hasSign)
-            % Check at least that both are on the same axis (required for topup)
+        elseif ~isempty(bidsPE) && ~isempty(revPE)
             fwdAxis = regexprep(bids_pe_to_fsl(bidsPE), '-$', '');
             revAxis = regexprep(bids_pe_to_fsl(revPE), '-$', '');
             if strcmp(fwdAxis, revAxis)
@@ -1915,19 +2094,22 @@ if strcmp(CFG.PREPROC_MODE, 'topup')
                 nWarnings = nWarnings + 1;
             end
         end
+
+        % The two EPIs must also come from the same visit to the scanner, or
+        % topup models the head moving as a distortion field.
+        nWarnings = nWarnings + warn_if_unmatched(boldFiles, reverseFile, 'reverse-PE EPI', CFG);
     else
         fprintf('  No reverse-PE JSON sidecar found — skipping reverse-PE validation.\n');
     end
 end
 
-% --- Validate fieldmap JSONs for realign_unwarp ---
-if strcmp(CFG.PREPROC_MODE, 'realign_unwarp') && isfolder(fmapDir)
-    phasediffJson = first_match(fmapDir, '.*phasediff.*\.json$');
-    if ~isempty(phasediffJson)
-        pj = read_json(phasediffJson);
+% --- The GRE phasediff ---
+if strcmp(CFG.PREPROC_MODE, 'realign_unwarp') && ~isempty(phasediffFile)
+    phasediffJson = regexprep(phasediffFile, '\.nii(\.gz)?$', '.json');
+    if isfile(phasediffJson)
+        pj = read_json_file(phasediffJson);
         fprintf('  Phasediff JSON: %s\n', phasediffJson);
 
-        % Check echo times
         if isfield(pj, 'EchoTime1') && isfield(pj, 'EchoTime2')
             bidsTE1 = pj.EchoTime1 * 1000;  % to ms
             bidsTE2 = pj.EchoTime2 * 1000;
@@ -1949,20 +2131,19 @@ if strcmp(CFG.PREPROC_MODE, 'realign_unwarp') && isfolder(fmapDir)
             fprintf('  Phasediff JSON has no EchoTime1/EchoTime2 — skipping TE validation.\n');
         end
     else
-        fprintf('  No phasediff JSON found in fmap/ — skipping TE validation.\n');
+        fprintf('  No phasediff JSON sidecar — skipping TE validation.\n');
     end
+    nWarnings = nWarnings + warn_if_unmatched(boldFiles, phasediffFile, 'phasediff', CFG);
 end
 
-% --- Validate the precalculated fieldmap sidecar ---
-if strcmp(CFG.PREPROC_MODE, 'precalc_fieldmap') && isfolder(fmapDir)
-    fmPat = regexptranslate('escape', CFG.FIELDMAP_PATTERN);
-    fmJson = first_match(fmapDir, ['^' regexptranslate('escape',SUB) '_' ...
-                                   regexptranslate('escape',SES) '.*' fmPat '\.json$']);
-    if isempty(fmJson)
-        fprintf('  No fieldmap JSON found in fmap/ — cannot cross-check units.\n');
+% --- The precalculated fieldmap ---
+if strcmp(CFG.PREPROC_MODE, 'precalc_fieldmap') && ~isempty(fieldmapFile)
+    fmJson = regexprep(fieldmapFile, '\.nii(\.gz)?$', '.json');
+    if ~isfile(fmJson)
+        fprintf('  No fieldmap JSON next to %s — cannot cross-check units.\n', fieldmapFile);
         fprintf('  Using FIELDMAP_UNITS from config: %s\n', CFG.FIELDMAP_UNITS);
     else
-        fj = read_json(fmJson);
+        fj = read_json_file(fmJson);
         fprintf('  Fieldmap JSON: %s\n', fmJson);
         if isfield(fj, 'Units') && ~isempty(fj.Units)
             jsonUnits = lower(strtrim(fj.Units));
@@ -2008,6 +2189,37 @@ end
 fprintf('\n');
 end
 
+function n = warn_if_unmatched(boldFiles, otherFile, label, CFG)
+% WARN_IF_UNMATCHED  Say so when a chosen input was acquired far from the BOLD.
+%
+% The run selection already tries to match by acquisition time, but an explicit
+% choice in run_selection.tsv overrides that, and a missing sidecar hides it.
+% This is the last place to notice that a distortion correction is about to be
+% estimated between scans from two different head positions.
+
+n = 0;
+if isempty(otherFile), return; end
+
+otherSec = bids_acq_time(otherFile);
+if isnan(otherSec), return; end
+
+boldSecs = [];
+for i = 1:numel(boldFiles)
+    if isempty(boldFiles{i}), continue; end
+    s = bids_acq_time(boldFiles{i});
+    if ~isnan(s), boldSecs(end+1) = s; end %#ok<AGROW>
+end
+if isempty(boldSecs), return; end
+
+gap = min(abs(boldSecs - otherSec));
+if gap > CFG.RUN_MATCH_GAP_SEC
+    fprintf(['  WARNING: the %s was acquired %.0f min from the nearest BOLD run.\n' ...
+             '           They are probably from different visits to the scanner —\n' ...
+             '           check run_selection.tsv.\n'], label, gap/60);
+    n = 1;
+end
+end
+
 function fslDir = bids_pe_to_fsl(bidsPE)
 % BIDS_PE_TO_FSL  Convert BIDS PhaseEncodingDirection to FSL convention.
 %   'i' -> 'x',  'i-' -> 'x-'
@@ -2031,37 +2243,22 @@ switch bidsPE
 end
 end
 
-function js = read_json(jsonFile)
-% READ_JSON  Read a JSON file and return as MATLAB struct.
-fid = fopen(jsonFile, 'r');
-if fid == -1
-    js = struct();
-    return;
-end
-raw = fread(fid, inf, '*char')';
-fclose(fid);
-try
-    js = jsondecode(raw);
-catch
-    js = struct();
-    warning('Could not parse JSON: %s', jsonFile);
-end
-end
-
 % ===================== PROVENANCE LOG =====================
 
-function save_provenance_log(funcDir, SUB, SES, CFG, cfgFile, taskBoldFiles, stagesRun)
+function save_provenance_log(DER, SUB, SES, CFG, cfgFile, taskBoldFiles, boldPicks, stagesRun)
 % SAVE_PROVENANCE_LOG  Write a JSON log of all preprocessing settings used.
 %
-% Saved as preproc_provenance.json in the func/ directory. Contains the
-% preprocessing mode, the stages this run executed, all key parameters,
-% timestamps, software versions, and input files.
+% Saved as preproc_provenance.json at the top of the session's derivatives.
+% Contains the preprocessing mode, the stages this run executed, which run of
+% each scan it chose, all key parameters, timestamps, software versions, and
+% input files.
 %
 % The JSON always describes the most recent run. Because stages can be run
 % separately, a running history of (timestamp, mode, stages) is also appended
 % to preproc_stages.log next to it.
 
-logFile = fullfile(funcDir, 'preproc_provenance.json');
+funcDir = DER.func;
+logFile = fullfile(DER.sesDir, 'preproc_provenance.json');
 fprintf('\nSaving provenance log: %s\n', logFile);
 
 prov = struct();
@@ -2091,9 +2288,23 @@ if strcmp(CFG.PREPROC_MODE, 'topup')
     end
 end
 
-% --- Input files ---
+% --- Input files, and which run of each was chosen ---
 prov.inputs.task_labels = CFG.TASK_LABELS;
 prov.inputs.bold_files = taskBoldFiles;
+prov.inputs.derivatives_dir = DER.sesDir;
+prov.inputs.deriv_reset = CFG.DERIV_RESET;
+
+prov.run_selection.file = CFG.RUN_SELECTION_FILE;
+prov.run_selection.strict = CFG.STRICT_RUN_MATCHING;
+prov.run_selection.match_gap_min = CFG.RUN_MATCH_GAP_SEC / 60;
+for i = 1:numel(boldPicks)
+    if isempty(boldPicks(i).path), continue; end
+    key = matlab.lang.makeValidName(['task_' boldPicks(i).label]);
+    prov.run_selection.chosen.(key) = struct( ...
+        'run',    boldPicks(i).runLabel, ...
+        'source', boldPicks(i).path, ...
+        'reason', boldPicks(i).reason);
+end
 
 % --- Acquisition parameters ---
 if isfield(CFG, 'TR'), prov.acquisition.TR = CFG.TR; end
@@ -2172,21 +2383,20 @@ if isfield(CFG, 'SMOOTH_FWHM')
 end
 
 % --- BIDS JSON values (for cross-reference) ---
-% Read the first BOLD JSON to store what BIDS says
-tLabel = CFG.TASK_LABELS{1};
-boldJsonCandidates = {
-    fullfile(funcDir, sprintf('%s_%s_task-%s_bold.json', SUB, SES, tLabel))
-    fullfile(funcDir, sprintf('%s_%s_task-%s_run-1_bold.json', SUB, SES, tLabel))
-};
+% The sidecar of the BOLD run this session actually used — not whichever
+% sidecar happened to sort first, which said the wrong thing for multi-run
+% sessions.
 boldJson = '';
-for i = 1:numel(boldJsonCandidates)
-    if isfile(boldJsonCandidates{i})
-        boldJson = boldJsonCandidates{i};
+for i = 1:numel(taskBoldFiles)
+    if isempty(taskBoldFiles{i}), continue; end
+    cand = regexprep(taskBoldFiles{i}, '\.nii(\.gz)?$', '.json');
+    if isfile(cand)
+        boldJson = cand;
         break;
     end
 end
 if ~isempty(boldJson)
-    bj = read_json(boldJson);
+    bj = read_json_file(boldJson);
     prov.bids_json.source_file = boldJson;
     if isfield(bj, 'RepetitionTime')
         prov.bids_json.RepetitionTime = bj.RepetitionTime;
@@ -2415,13 +2625,19 @@ if ~isfile(acqFile)
 end
 end
 
-function vdmPath = existing_task_vdm(funcDir, taskN)
+function vdmPath = existing_task_vdm(funcDir, taskLabel, taskIdx)
 % EXISTING_TASK_VDM  Path to a voxel displacement map already on disk, or ''.
-% Matches what calc_vdm_for_run_to_func / convert_topup_to_vdm write.
+%
+% Matches what calc_vdm_for_run_to_func / convert_topup_to_vdm write
+% (vdm_task-<label>.nii). The index form vdm_task-<N>.nii is still accepted:
+% it is what earlier versions wrote, and what the documented "drop in your own
+% VDMs and run realign,coreg,smooth" workflow tells people to create.
 
 vdmPath = '';
-candidates = { fullfile(funcDir, sprintf('vdm_task-%d.nii', taskN)), ...
-               fullfile(funcDir, sprintf('vdm_task-%d.img', taskN)) };
+candidates = { fullfile(funcDir, sprintf('vdm_task-%s.nii', taskLabel)), ...
+               fullfile(funcDir, sprintf('vdm_task-%s.img', taskLabel)), ...
+               fullfile(funcDir, sprintf('vdm_task-%d.nii', taskIdx)), ...
+               fullfile(funcDir, sprintf('vdm_task-%d.img', taskIdx)) };
 for k = 1:numel(candidates)
     if isfile(candidates{k})
         vdmPath = candidates{k};
@@ -2453,9 +2669,11 @@ meanu_imgs = cell(0,1);
 for ii = 1:numel(CFG.TASK_LABELS)
     tLabel = CFG.TASK_LABELS{ii};
     escLabel = regexptranslate('escape', tLabel);
-    m = newest_match(funcDir, ['^meanu.*task-' escLabel '.*\.nii$']);
+    % The boundary after the label matters: without it task-run1 also matches
+    % the mean image of task-run10.
+    m = newest_match(funcDir, ['^meanu.*_task-' escLabel '(_|\.).*\.nii$']);
     if isempty(m)
-        m = newest_match(funcDir, ['^mean.*task-' escLabel '.*\.nii$']);
+        m = newest_match(funcDir, ['^mean.*_task-' escLabel '(_|\.).*\.nii$']);
     end
     if isempty(m)
         % Broad fallback: any mean* matching this task

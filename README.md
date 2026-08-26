@@ -54,8 +54,21 @@ All scripts auto-detect their directory and read configuration automatically.
 | `run_gridcat.sh`              | Shell  | Wrapper for GridCAT GLM analysis                                               |
 | `run_gridcat_analysis.m`      | MATLAB | Runs GLM1 (per-session) and GLM2 (per-ROI) connectivity analysis               |
 | `collect_gridcat_output.R`    | R      | Collects GridCAT results into CSV + HTML report                                |
-| `move_rois.sh`                | Shell  | Copies/renames manual ROI segmentations into BIDS anat/ directories            |
-| `scan_multirun.sh`            | Shell  | Scans for multi-run T2w/BOLD/reverse-PE files; generates `run_selection.tsv`   |
+| `move_rois.sh`                | Shell  | Imports manual ROI segmentations into the ROI derivatives dataset              |
+| `scan_multirun.sh`            | Shell  | Scans for multi-run scans of every kind; generates `run_selection.tsv`         |
+| `scan_multirun.py`            | Python | The scanner itself: groups a session's scans into blocks by acquisition time   |
+| `clean_bids_leftovers.sh`     | Shell  | Removes preprocessing output that older versions wrote into `BIDS_ROOT`        |
+| `bids_common.sh`              | Shell  | Shared library: derivative paths, BIDS filenames, JSON sidecars, run selection |
+| `bids_deriv.m`                | MATLAB | Where a session's derived files live                                           |
+| `bids_reset_deriv.m`          | MATLAB | Clears a session's derivatives before a from-scratch run                       |
+| `bids_stage.m`                | MATLAB | Copies one input into the derivatives, decompressing `.nii.gz`                 |
+| `bids_entities.m`             | MATLAB | Splits a BIDS filename into `sub`/`ses`/`task`/`run`/suffix                    |
+| `bids_list_runs.m`            | MATLAB | Lists every run of one scan in a session, with acquisition times               |
+| `bids_pick_run.m`             | MATLAB | Chooses one run out of several, and says why                                   |
+| `bids_load_selection.m`       | MATLAB | Reads `run_selection.tsv`                                                      |
+| `bids_selection_for.m`        | MATLAB | Looks one scan type up in a loaded selection                                   |
+| `bids_acq_time.m`             | MATLAB | Acquisition time and series number from a JSON sidecar                         |
+| `read_json_file.m`            | MATLAB | JSON sidecar reader                                                            |
 | `ashs_extract_config.sh`      | Shell  | (Optional) Helper to extract ASHS ROI configuration                            |
 | `ashs_extract_labels.sh`      | Shell  | (Optional) Extracts ROI labels from ASHS output                                |
 
@@ -98,7 +111,79 @@ dataset/
 - **ROI masks are label masks** (integer-valued), not probability maps.
 - **You know the space** of every file at each processing stage (native T2w, native EPI, unwarped EPI, resliced EPI).
 - **Runs with different acquisition parameters** require explicit handling (branching, separate preprocessing, or exclusion).
-- **Multiple runs of the same task** are supported. Use `scan_multirun.sh` to generate a `run_selection.tsv` that lets you choose which run to use per subject/session. Without a selection file, the pipeline auto-selects the last (highest-numbered) run.
+- **Multiple runs of any scan** — T1w, T2w, task BOLD, phasediff, magnitude, ready-made fieldmap, reverse-PE EPI — are supported, and are matched to each other by acquisition time rather than by run number. See [Multiple runs of the same scan](#multiple-runs-of-the-same-scan).
+
+---
+
+## Where the pipeline writes
+
+**Nothing is ever written into `BIDS_ROOT`.** Every file the pipeline creates or
+modifies goes into a BIDS-style derivatives tree:
+
+```
+<DERIV_ROOT>/                        default: <OUTPUT_ROOT>/derivatives
+├── spm-preproc/                     everything SPM produces
+│   ├── dataset_description.json
+│   └── sub-XX/ses-YY/
+│       ├── func/                    u*_bold.nii, su*_bold.nii, rp_*.txt,
+│       │                            vdm_task-<label>.nii, topup_*,
+│       │                            meanu_session.nii
+│       ├── anat/                    the chosen T2w, the resliced r*_mask.nii
+│       ├── fmap/                    the fieldmap inputs that were used
+│       ├── preproc_run_selection.tsv   which run of each scan was chosen
+│       ├── preproc_provenance.json     every setting this run used
+│       └── preproc_stages.log          history of stage runs
+├── rois/                            masks imported by move_rois.sh
+│   └── sub-XX/ses-YY/anat/
+└── fieldmaps/                       fieldmaps built by make_fieldmaps.sh
+    └── sub-XX/ses-YY/fmap/
+```
+
+This is not only tidiness. SPM's Realign & Unwarp and Coregister write the
+transforms they estimate **into the headers of their input images**, and reading
+a `.nii.gz` used to leave a decompressed twin behind. Run any of that directly
+on a BIDS directory and the raw data quietly stops being raw. So each input is
+copied into `spm-preproc` first and SPM only ever sees the copy.
+
+The three datasets have different lifetimes:
+
+| Dataset      | Written by                | Cleared on a preprocessing re-run?                              |
+| ------------ | ------------------------- | --------------------------------------------------------------- |
+| `spm-preproc`| `run_spm_preproc.m`       | **Yes** — see `DERIV_RESET`                                       |
+| `rois`       | `move_rois.sh`            | No: manual segmentation, re-importing is your call (`--force`)    |
+| `fieldmaps`  | `make_fieldmaps.sh`       | No: rebuilding means another FSL pass (`--force`)                 |
+
+### Old output is replaced, not accumulated
+
+`DERIV_RESET=auto` (the default) clears a session's `spm-preproc` directory
+whenever a run starts the preprocessing from its beginning — `--stages all`, or
+a stage list containing the first stage your `PREPROC_MODE` performs. The result
+can then never be a mixture of this run and the last one: no stale voxel
+displacement maps, no `u*_bold.nii` from a different chosen run, no leftover
+topup field.
+
+Submitting the whole subject list clears the entire dataset before submitting,
+which also drops sessions you have since filtered out. Submitting for a single
+`--sub`/`--ses` only clears that session.
+
+A **resumed** run (`--stages realign,coreg,smooth`, or just `smooth`) keeps the
+directory: that output is its input. `DERIV_RESET=always` clears even those, and
+`never` clears nothing.
+
+### Cleaning up after an older version
+
+Earlier versions ran SPM directly on `BIDS_ROOT`. A dataset processed with one
+of those still holds `u*_bold.nii`, `rp_*.txt`, VDMs, topup results, resliced
+masks and a decompressed twin of every `.nii.gz`:
+
+```bash
+bash clean_bids_leftovers.sh
+```
+
+It lists what it would remove and deletes nothing until you add `--execute`
+(menu options `K` / `KX`). Raw scans, sidecars and anything else named like
+acquisition output are protected by an explicit filter, not just by the search
+patterns.
 
 ---
 
@@ -107,8 +192,9 @@ dataset/
 ### Never Preprocess the Same File Twice
 
 - Do not rerun realign/unwarp/coregister on a product of a previous preprocessing step.
-- Always start from a fresh, native copy of the functional data.
-- If uncertain, delete the derived directory and rebuild from raw/copies via bidscoiner or manual reset.
+- The derivatives layout takes care of this for you: every stage reads the raw
+  BIDS file and writes to `spm-preproc`, and a from-scratch run clears that
+  directory first.
 - Cumulative alterations can produce subtle artifacts. When in doubt, inspect headers and provenance.
 
 ### Make Study Design Explicit Upfront
@@ -156,8 +242,11 @@ The config file contains 7 main sections:
 
 ### Key Settings to Review
 
-- **BIDS_ROOT** — Absolute path to BIDS dataset root
+- **BIDS_ROOT** — Absolute path to BIDS dataset root. **Read only** — the pipeline never writes here
 - **OUTPUT_ROOT** — Where to write derived data
+- **DERIV_ROOT** — Where the BIDS-style derivatives go. Empty = `<OUTPUT_ROOT>/derivatives`. See [Where the pipeline writes](#where-the-pipeline-writes)
+- **DERIV_RESET** — `auto` (default) clears the preprocessing derivatives on a from-scratch run, `always` on every run, `never` not at all
+- **RUN_SELECTION_FILE** / **RUN_MATCH_GAP_MIN** / **STRICT_RUN_MATCHING** — how several runs of the same scan are matched to each other. See [Multiple runs of the same scan](#multiple-runs-of-the-same-scan)
 - **PREPROC_MODE** — Choose `realign_unwarp`, `topup`, `precalc_fieldmap`, or `realign_only`
 - **PREPROC_STAGES** — Which parts of the preprocessing to run: `all` (default), or a comma-separated subset of `topup,vdm,realign,coreg,smooth`. See [Running preprocessing in stages](#running-preprocessing-in-stages)
 - **TASKS** — Comma-separated task numbers to process (e.g., `1,2,3` matches task-1, task-2, task-3)
@@ -231,22 +320,102 @@ The filter creates a backup of the original list as `subses_list_full.txt` befor
 
 ---
 
-### Option M: Scan for Multi-run cases (recommended)
+### Multiple runs of the same scan
 
-If you have not pre-filtered and removed cases with more than one run of a scan, use this tool.
+A session can hold several runs of a T1w, T2w, task BOLD, phasediff, magnitude,
+fieldmap or reverse-PE EPI. **Run numbers are counted per modality and carry no
+meaning across modalities.** If a subject climbs out of the scanner and comes
+back, the second visit restarts every counter independently, and some scans are
+not repeated at all — so `run-2` of the T2w and `run-2` of a task can easily be
+from different visits, while a task with only `run-1` may belong to the second.
+Pairing by run number then coregisters an anatomy from one head position onto
+functional data from another, and nothing downstream will tell you.
 
-**What it does:**
-- Creates a filter csv file 
-- CSV file is used downstream for run selection
+What does say which scans belong together is **when they were acquired**. The
+pipeline decides in this order, per scan:
 
-**How to use**
-- Run the step
-- Edit the csv file using ```nano file_name.csv```
+1. **Your choice** in `run_selection.tsv` (`RUN_SELECTION_FILE`).
+2. **The run acquired closest in time to the nearest functional run**, read
+   from `AcquisitionTime` in the JSON sidecars, as long as it is within
+   `RUN_MATCH_GAP_MIN` minutes of it. Nearest, not first: in a long protocol
+   the reverse-PE EPI at the end is naturally far from the first task and still
+   belongs to the same visit.
+3. **Nothing else is safe.** With `STRICT_RUN_MATCHING=true` (the default) the
+   run stops and asks for a selection; with `false` it takes the highest run
+   number and warns loudly.
 
-**!CAVE!** Do NOT rely entirely upon this script. This is a messy situation and can be easy to disregard because of how much work it takes, but you absolutely need to manually double check this to make sure that:
+The task runs themselves are resolved first, in two passes: a task with only
+one run needs no decision and pins down where the functional block is, and the
+tasks that do need one are then matched against it. So a session with two runs
+of `task-run1` and a single `task-run2` resolves on its own, with `task-run2`
+telling the pipeline which `task-run1` to keep.
+
+#### Option M: scan for multi-run cases
+
+```bash
+bash scan_multirun.sh
+```
+
+It groups each session's scans into blocks separated by more than
+`RUN_MATCH_GAP_MIN`, prints the sessions that turn out to be split, and writes
+`run_selection.tsv` with a suggestion already filled in:
+
+```
+  sub-02 / ses-01 — 2 separate blocks of acquisition:
+      [A] 09:00:00  T1w            run-1
+      [A] 09:07:00  T2w            run-1
+      [A] 09:15:00  task-run1      run-1
+      [A] 09:20:00  reverse        run-1
+      [B] 11:20:00  T2w            run-2
+      [B] 11:30:00  task-run1      run-2 <- functional block
+      [B] 11:44:00  task-run2      no-run <- functional block
+      [B] 11:52:00  reverse        run-2
+```
+
+| subject | session | type      | available_runs | selected_run | functional_block | runs_detail                              |
+| ------- | ------- | --------- | -------------- | ------------ | ---------------- | ---------------------------------------- |
+| sub-02  | ses-01  | T2w       | run-1,run-2    | run-2        | B                | run-1@09:07:00[A]#3,run-2@11:20:00[B]#8  |
+| sub-02  | ses-01  | reverse   | run-1,run-2    | run-2        | B                | run-1@09:20:00[A]#5,run-2@11:52:00[B]#11 |
+| sub-02  | ses-01  | task-run1 | run-1,run-2    | run-2        | B                | run-1@09:15:00[A]#4,run-2@11:30:00[B]#9  |
+
+`runs_detail` gives every run as `run-N@time[block]#series`, so a suggestion
+from the wrong block is visible at a glance. Correct anything that is wrong,
+fill in the blanks, and point `RUN_SELECTION_FILE` at the file. Re-running the
+scanner keeps the choices you have already made (pass `--fresh` to discard
+them).
+
+Note in the example that `task-run2` has no run entity at all and still belongs
+to block B — a run-number rule would have paired it with the T2w from block A.
+
+**!CAVE!** Do not rely entirely upon this script. Acquisition times tell you
+which scans were acquired together, not which of them are any good. You still
+need to check by hand that:
 - You pass uncorrupted and high quality images into the pipeline
 - You consistently use either a corrected or uncorrected version of a scan across the study
-- Your anatomical images match your functional scans I.E. the subject cannot have left the scanner between the aquisition of T2w and the functional scans!
+- The suggestion matches what you know about the session
+
+#### What gets recorded
+
+Each session's derivatives carry `preproc_run_selection.tsv`, listing the run,
+acquisition time, source file and reason for every scan the preprocessing chose.
+`prepare_gridcat_directory.m` collects these into
+`GLM_runauto/run_manifest.tsv`, which is what lets the event tables be matched
+to the right run.
+
+#### Event tables
+
+Inside `GLM_runauto` the run entity is dropped from every filename: exactly one
+run per task was preprocessed, so `u<sub>_<ses>_task-run1_bold_00001.nii` is
+unambiguous. Event tables are matched against `run_manifest.tsv`:
+
+- `sub-01_ses-01_task-run1_EventData.txt` — no run entity, so it belongs to
+  whichever run was preprocessed. This is the common case.
+- `sub-02_ses-01_task-run1_run-2_EventData.txt` — carries a run, so it is used
+  only if `run-2` is the run that was preprocessed. If `run-1` was, the file is
+  skipped with a message rather than silently analysed against the wrong data.
+- Two tables claiming the same subject/session/task and neither naming a run is
+  an error: put the run entity in one of the names, or remove the one that does
+  not belong.
 
 ---
 
@@ -336,8 +505,8 @@ Each job processes one subject-session pair. The exact steps depend on `PREPROC_
 4. Average per-task mean images into a session mean
 5. Coregister T2w to session mean EPI; reslice ROI masks (nearest-neighbor interpolation)
 
-**Output in func/:** `u<BOLD>.nii`, `meanu<BOLD>.nii` (one per task), `meanu_session.nii`, `rp_<BOLD>.txt`
-**Output in anat/:** `r<ROI>.nii` (resliced masks)
+**Output in `spm-preproc/<sub>/<ses>/func/`:** `u<BOLD>.nii`, `meanu<BOLD>.nii` (one per task), `meanu_session.nii`, `rp_<BOLD>.txt`
+**Output in `spm-preproc/<sub>/<ses>/anat/`:** `r<ROI>.nii` (resliced masks)
 
 #### Mode B: `topup` + `applytopup`
 
@@ -350,8 +519,8 @@ Each job processes one subject-session pair. The exact steps depend on `PREPROC_
 7. Realign (estimate + write) all corrected BOLDs in one SPM batch (motion correction only, since distortion is already corrected)
 8. Coregister T2w to mean EPI; reslice ROI masks
 
-**Output in func/:** `u<BOLD>_dc.nii`, `mean<BOLD>_dc.nii`, `rp_<BOLD>_dc.txt`, `topup_results_*`, `topup_acqparams.txt`
-**Output in anat/:** `r<ROI>.nii`
+**Output in `spm-preproc/<sub>/<ses>/func/`:** `u<BOLD>_dc.nii`, `mean<BOLD>_dc.nii`, `rp_<BOLD>_dc.txt`, `topup_results_*`, `topup_acqparams.txt`
+**Output in `spm-preproc/<sub>/<ses>/anat/`:** `r<ROI>.nii`
 
 #### Mode C: `topup` + `vdm`
 
@@ -360,8 +529,8 @@ Each job processes one subject-session pair. The exact steps depend on `PREPROC_
 3. Realign & Unwarp all tasks in one SPM batch using these VDMs (joint motion + distortion correction, same as `realign_unwarp` but with topup-derived VDMs)
 4. Average per-task means into session mean; coregister + reslice ROIs
 
-**Output in func/:** `u<BOLD>.nii`, `meanu<BOLD>.nii`, `meanu_session.nii`, `rp_<BOLD>.txt`, `vdm_task-*.nii`, `topup_results_*`
-**Output in anat/:** `r<ROI>.nii`
+**Output in `spm-preproc/<sub>/<ses>/func/`:** `u<BOLD>.nii`, `meanu<BOLD>.nii`, `meanu_session.nii`, `rp_<BOLD>.txt`, `vdm_task-*.nii`, `topup_results_*`
+**Output in `spm-preproc/<sub>/<ses>/anat/`:** `r<ROI>.nii`
 
 #### Mode D: `precalc_fieldmap` (fieldmap built from the T1w)
 
@@ -370,16 +539,18 @@ For sessions that have a phase-difference image but **no magnitude image**, so
 [Building fieldmaps from a structural](#building-fieldmaps-from-a-structural) for
 how the fieldmap is produced.
 
-1. Decompress all `.nii.gz` to `.nii`
-2. Read `fmap/<sub>_<ses>[_run-N]_fieldmap.nii` (rad/s) and its `_magnitude.nii`
+1. Copy the chosen inputs into the derivatives, decompressing `.nii.gz` on the way
+2. Read `<sub>_<ses>[_run-N]_fieldmap.nii` (rad/s) and the `_magnitude.nii`
+   acquired with it, from the fieldmap derivatives or the raw `fmap/`
 3. Convert rad/s → Hz (divide by 2π) — SPM's FieldMap toolbox works in Hz
 4. For each task: SPM "Calculate VDM" from the precalculated fieldmap, matched
-   to that task's first EPI volume → `func/vdm_task-<N>.nii`
+   to that task's first EPI volume → `func/vdm_task-<label>.nii`
 5. Realign & Unwarp all tasks in one SPM batch
 6. Coregister T2w to the session mean; reslice ROI masks
 
-**Output in func/:** `u<BOLD>.nii`, `meanu<BOLD>.nii`, `rp_<BOLD>.txt`, `vdm_task-<N>.nii`
-**Output in anat/:** `r<ROI>.nii`
+**Output** (under `<DERIV_ROOT>/spm-preproc/<sub>/<ses>/`):
+`func/u<BOLD>.nii`, `func/meanu<BOLD>.nii`, `func/rp_<BOLD>.txt`,
+`func/vdm_task-<label>.nii`, `anat/r<ROI>.nii`
 
 The voxel-shift conversion is done by SPM, from `TOTAL_READOUT_MS` and
 `BLIP_DIRECTION` — this mode only converts the units of the input fieldmap.
@@ -393,8 +564,8 @@ Set `EPI_BASED_FIELDMAP=0`: a fieldmap made from a GRE phasediff is not EPI-base
 2. Realign (estimate + write) all tasks in one SPM batch (motion correction only)
 3. Coregister T2w to mean EPI; reslice ROI masks
 
-**Output in func/:** `u<BOLD>.nii`, `mean<BOLD>.nii`, `rp_<BOLD>.txt`
-**Output in anat/:** `r<ROI>.nii`
+**Output in `spm-preproc/<sub>/<ses>/func/`:** `u<BOLD>.nii`, `mean<BOLD>.nii`, `rp_<BOLD>.txt`
+**Output in `spm-preproc/<sub>/<ses>/anat/`:** `r<ROI>.nii`
 
 ---
 
@@ -459,19 +630,29 @@ bash make_fieldmaps.sh               # write the fieldmaps
 
 …or menu options `B` (dry-run) and `BX` (execute) in `run_pipeline.sh`.
 
-**What it writes** — BIDS "Case 3" names, in each session's `fmap/`, carrying the
-same entities as the phasediff it came from:
+**What it writes** — BIDS "Case 3" names, in the fieldmap derivatives dataset,
+carrying the same entities as the phasediff it came from:
 
 ```
-fmap/<sub>_<ses>[_run-N]_fieldmap.nii[.gz]    the fieldmap, in rad/s
-fmap/<sub>_<ses>[_run-N]_magnitude.nii[.gz]   the brain-only magnitude
-fmap/<sub>_<ses>[_run-N]_fieldmap.json        Units, IntendedFor, provenance
+<DERIV_ROOT>/fieldmaps/<sub>/<ses>/fmap/
+    <sub>_<ses>[_run-N]_fieldmap.nii[.gz]    the fieldmap, in rad/s
+    <sub>_<ses>[_run-N]_magnitude.nii[.gz]   the brain-only magnitude
+    <sub>_<ses>[_run-N]_fieldmap.json        Units, IntendedFor, provenance
 ```
 
-Intermediates go to a temporary `fmap/.work_<stem>/` that is deleted at the end
-(`--keep-work` keeps it). Nothing is written to `anat/`, and the names cannot be
-mistaken for a `phasediff`, a `magnitude1`, a `T2w` or a VDM, so the rest of the
-pipeline is unaffected for sessions you do not run it on.
+`BIDS_ROOT` is only read. The preprocessing searches this dataset first and the
+raw `fmap/` second, so fieldmaps made by an older version keep working.
+
+Intermediates go to a temporary `.work_<stem>/` inside the output directory,
+deleted at the end (`--keep-work` keeps it). This dataset is **not** cleared
+when the preprocessing re-runs — rebuilding a fieldmap means another FSL pass,
+so it only happens when you pass `--force`.
+
+**Multi-run sessions.** Each phasediff is paired with the T1w carrying the same
+run entity; failing that, with the one acquired closest to it in time; failing
+that, with whatever `run_selection.tsv` says for `T1w`. Taking "the last T1w in
+sorted order" would silently resample a structural from one visit to the scanner
+into a phasediff acquired in another.
 
 **Then preprocess with:**
 
@@ -526,13 +707,18 @@ Step 2 is not one indivisible block. It runs as five stages, in this order:
 | Stage | What it does | What it writes | No-op when |
 |-------|--------------|----------------|------------|
 | `topup` | FSL topup estimates the distortion field from the forward/reverse-PE pair | `func/topup_results_*`, `func/topup_acqparams.txt` | `PREPROC_MODE` is not `topup` |
-| `vdm` | Builds one voxel displacement map per task, matched to that task's first EPI volume | `func/vdm_task-<N>.nii` | mode is `realign_only`, or `topup`+`applytopup` |
+| `vdm` | Builds one voxel displacement map per task, matched to that task's first EPI volume | `func/vdm_task-<label>.nii` | mode is `realign_only`, or `topup`+`applytopup` |
 | `realign` | Applies the distortion correction and estimates motion (Realign & Unwarp, or applytopup + Realign, or Realign alone) | `func/u*_bold.nii`, `func/rp_*.txt`, per-task means, `func/meanu_session.nii` | never |
 | `coreg` | Coregisters T2w to the session mean and reslices the ROI masks into EPI space | `anat/r*_mask.nii` | `DO_COREG_ROIS=0` |
 | `smooth` | Gaussian smoothing of the preprocessed BOLD | `func/su*_bold.nii` | `SMOOTH_FWHM=0` |
 
+All paths are relative to `<DERIV_ROOT>/spm-preproc/<sub>/<ses>/`.
+
 Each stage reads its inputs from disk rather than from the stage before it, so any
-contiguous piece of the chain can be run on its own. Set the default in the config:
+contiguous piece of the chain can be run on its own. A stage list that starts the
+preprocessing from its beginning clears the session's derivatives first; a
+resumed list keeps them, because that is what it reads. Set the default in the
+config:
 
 ```bash
 PREPROC_STAGES=all                        # the complete preprocessing (default)
@@ -552,8 +738,10 @@ bash submit_preproc.sh --stages realign,coreg,smooth
 
 Partial runs get a job name that names the stages (`spm_realign_coreg_smooth`), so
 they are easy to tell apart from a full array in `squeue`. Every run appends a line
-to `func/preproc_stages.log` recording the timestamp, mode and stages, and rewrites
-`func/preproc_provenance.json` with a `stages_run` field.
+to `preproc_stages.log` recording the timestamp, mode and stages, and rewrites
+`preproc_provenance.json` with a `stages_run` field and the run selection it used.
+`preproc_run_selection.tsv` is merged rather than replaced, so re-running `coreg`
+on its own does not erase which BOLD run the realignment used.
 
 **Resuming from fieldmaps you made yourself**
 
@@ -635,7 +823,7 @@ After preprocessing finishes, spot-check a few subjects:
 | EPI globally warped | Unwarping failed; wrong params (readout time, TE, deltaTE) | Re-check JSON parameters; try realign_only as baseline |
 | MTL/EC signal absent | Over-aggressive unwarp, wrong fieldmap, wrong PE direction | Verify fmap corresponds to this run/session; inspect raw signal |
 | Mask position off | Coregistration error, orientation mismatch, native T2w not native | Check T2w is truly native; verify coregistration reference |
-| Multiple rp files per run | Previous preprocessing attempt lingering | Delete old derivatives; restart from native |
+| Multiple rp files per run | Derivatives not cleared between runs | Re-run preprocessing with `DERIV_RESET=auto` (the default) |
 
 ---
 
@@ -647,24 +835,30 @@ After preprocessing finishes, spot-check a few subjects:
 
 **What it does:**
 
-Runs `prepare_gridcat_directory.m` for each subject-session:
+Runs `prepare_gridcat_directory.m`, reading the `spm-preproc` derivatives (not
+`BIDS_ROOT` — nothing GridCAT needs lives there) for each subject-session:
 
-1. **Split 4D → 3D:** Converts `uxxxx.nii.gz` into individual 3D volumes (GridCAT expects separate files per timepoint)
-2. **Copy motion regressors:** Copies `rp_*.txt` to GLM directory with consistent naming
-3. **Create bilateral ROIs:** Combines left and right masks into a bilateral mask (if `ROI_MODE=bilateral` in config)
-4. **Verify directory structure:** Ensures GLM working directory exists and is populated
+1. **Split 4D → 3D:** Converts `u*_bold.nii` into individual 3D volumes (GridCAT expects separate files per timepoint)
+2. **Copy motion regressors:** Copies `rp_*.txt` to the GLM directory
+3. **Create bilateral ROIs:** Combines left and right masks into a bilateral mask (if `ROI_MODE` asks for one)
+4. **Drop the run entity** from every name it writes, and record which run each file came from in `run_manifest.tsv`
 
-**Input:**
-- Unwarped 4D EPI (`uxxxx.nii.gz`)
-- Resliced ROI masks (`wroi_left.nii.gz`, `wroi_right.nii.gz`)
-- Motion regressors (`rp_*.txt`)
+**Input** (from `<DERIV_ROOT>/spm-preproc/sub-XX/ses-YY/`):
+- Preprocessed 4D EPI: `func/su<sub>_<ses>_task-<label>[_run-N]_bold.nii`
+- Motion regressors: `func/rp_*.txt`
+- Resliced ROI masks: `anat/r<sub>_<ses>[_run-N]_hemi-*_label-*_mask.nii`
 
 **Output:**
-- 3D EPI volumes: `GLM_runauto/sub-XX_ses-YY_task-X_run-Y_bold_0001.nii.gz`, `0002.nii.gz`, etc.
-- Motion files: `GLM_runauto/rp_sub-XX_ses-YY_task-X_run-Y.txt`
-- ROI masks: `GLM_runauto/sub-XX_ses-YY_roi_left.nii.gz`, `roi_right.nii.gz`, `roi_bilateral.nii.gz`
+- 3D EPI volumes: `GLM_runauto/functional_scans_split/su<sub>_<ses>_task-<label>_bold_00001.nii`, …
+- Motion files: `GLM_runauto/rp_txt/rp_<sub>_<ses>_task-<label>.txt`
+- ROI masks: `GLM_runauto/ROI/r<sub>_<ses>_hemi-{left,right,bilat}_label-*_mask.nii`
+- `GLM_runauto/run_manifest.tsv` — which run of each task the files came from
 
-**Important:** Delete or isolate original 4D files after splitting. GridCAT must not accidentally mix 4D and 3D.
+**Re-running is safe.** `functional_scans_split/`, `rp_txt/` and `ROI/` are
+emptied first, so a second preparation — after changing `SMOOTH_FWHM`, or after
+selecting a different run — cannot leave the previous flattening behind for
+GridCAT to pick up alongside the new one. `EventFiles/` is never touched: you
+put those there.
 
 **QC Checkpoint: Bilateral ROIs**
 
@@ -794,6 +988,7 @@ Instead of running steps individually, use the interactive menu:
 ```
 GridCAT Pipeline - Main Menu
 ============================
+Individual Steps:
 0)  Discover subjects/sessions (step0_make_subses_list.sh)
 F)  Filter subject/session list (filter_subses_list.sh)
 1)  Validate configuration (validate_config.sh)
@@ -801,25 +996,41 @@ F)  Filter subject/session list (filter_subses_list.sh)
 2S) Run SPM preprocessing — pick stages (topup/vdm/realign/coreg/smooth)
 3)  Prepare for GridCAT (run_prep.sh)
 4)  Run GridCAT analysis (run_gridcat.sh)
-5)  Collect results (collect_gridcat_output.R)
+
+Data Preparation:
+M)  Scan for multi-run cases, write run_selection.tsv
+R)  Import ROI masks into the derivatives (dry-run)
+RX) Import ROI masks into the derivatives (execute)
 B)  Build fieldmaps from T1w + phasediff (dry-run)
 BX) Build fieldmaps from T1w + phasediff (execute)
-A)  Run all steps (0-5 in sequence)
-Q)  Quit
+K)  Clean old pipeline output out of BIDS_ROOT (dry-run)
+KX) Clean old pipeline output out of BIDS_ROOT (execute)
 
-Select [0-5/2S/F/A/B/BX/Q]:
+Batch Operations:
+A)  Run ALL steps (0→1 locally, then 2→3→4 chained on SLURM)
+S)  Show current settings
+C)  Check job status
+L)  Show pipeline log
+Q)  Quit
 ```
 
 **Recommended workflow:**
 
 1. Run `0` (discover) once at setup
-2. Run `F` (filter) if you need to select specific subjects/sessions
-3. Run `1` (validate) before first full run and after config changes
-4. Run `2` (preprocessing) via HPC; wait for completion — or `2S` to run only
+2. Run `M` (scan for multi-run cases) and check `run_selection.tsv` — do this
+   before anything else if any session has repeated scans
+3. Run `R`/`RX` to import ROI masks, and `B`/`BX` if you need fieldmaps built
+   from structurals
+4. Run `F` (filter) if you need to select specific subjects/sessions
+5. Run `1` (validate) before first full run and after config changes
+6. Run `2` (preprocessing) via HPC; wait for completion — or `2S` to run only
    some of the preprocessing stages, e.g. when resuming from fieldmaps you
    produced yourself
-5. Run `3` → `4` → `5` in sequence
-6. Or run `A` to automate all steps (filter runs automatically after step 0)
+7. Run `3` → `4` → `5` in sequence
+8. Or run `A` to automate all steps (filter runs automatically after step 0)
+
+Coming from an older version of this pipeline? Run `K` once to see what it left
+inside `BIDS_ROOT`, then `KX` to remove it.
 
 **DRY_RUN Mode:**
 
@@ -1079,7 +1290,7 @@ After Step 2 preprocessing completes, verify:
 | Mask position off by >5 mm | Coregistration failure | Verify EPI reference (should be unwarped mean); check if T2w is truly native |
 | Mask outside brain | Space mismatch or wrong reference | Check coregistration reference file; verify T2w native space |
 | Mask rotated or sheared | Orientation/header issue | Check sform/qform consistency; reorient T2w if needed |
-| Multiple rp files per run | Previous preprocessing lingering | Delete old derivatives; restart from native EPI |
+| Multiple rp files per run | Derivatives not cleared between runs | Re-run preprocessing with `DERIV_RESET=auto` (the default) |
 
 ---
 
@@ -1104,9 +1315,16 @@ GridCAT requires precise event timing in `EventData.txt` files.
 Columns: `onset_sec duration weight condition_label`
 
 **File Naming:**
-- Must include sub, ses, task identifiers matching pipeline naming
-- Must be placed in `GLM_runauto/` directory
-- One file per session (or per task, depending on GLM strategy)
+- `<sub>_<ses>_task-<label>[_run-N]_EventData.txt`, placed in
+  `GLM_runauto/EventFiles/Event_tables/`
+- The run entity is **optional**. Without one, the table is used for whichever
+  run of that task was preprocessed — which is what you want in almost every
+  case, and what most exporters produce.
+- With one, it is used only if that run is the run that was preprocessed
+  (checked against `run_manifest.tsv`). A table for a run that was not used is
+  skipped with a message.
+- One table per subject/session/task. Two tables claiming the same one, neither
+  naming a run, is an error rather than a coin flip.
 
 **QC:**
 - Verify event counts match raw task logs
@@ -1125,12 +1343,18 @@ Step 3 (Prepare) automatically copies motion regressors from preprocessing. Veri
 **If mismatch suspected:**
 
 ```bash
-# List all rp files
-find derivatives/ -name "rp_*" -exec ls -l {} \;
-
-# Check timestamps; newest should correspond to current preprocessing
-# Delete old rp files if multiple exist per run
+# Which run of each task was preprocessed, and where it came from
+cat <OUTPUT_ROOT>/GLM_runauto/run_manifest.tsv
 ```
+
+```bash
+# The same, per session, with acquisition times and the reason for each choice
+cat <DERIV_ROOT>/spm-preproc/sub-XX/ses-YY/preproc_run_selection.tsv
+```
+
+A duplicate rp file per run means the preprocessing derivatives were not
+cleared between runs — re-run the preprocessing with `DERIV_RESET=auto`
+(the default).
 
 ### 4D → 3D Splitting
 
