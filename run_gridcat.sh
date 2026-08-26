@@ -64,12 +64,6 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     if [[ -f "${ORIG_SCRIPT_DIR}/subses_list.txt" ]]; then
         cp "${ORIG_SCRIPT_DIR}/subses_list.txt" "${SNAP_DIR}/subses_list.txt"
     fi
-    # The run selection decided which run of each scan was preprocessed, so it
-    # belongs with the snapshot: without it the record of this analysis cannot
-    # say which data it ran on.
-    if [[ -n "${RUN_SELECTION_FILE:-}" && -f "${RUN_SELECTION_FILE}" ]]; then
-        cp "${RUN_SELECTION_FILE}" "${SNAP_DIR}/run_selection.tsv"
-    fi
 
     {
         echo "snapshot_dir: ${SNAP_DIR}"
@@ -79,7 +73,6 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         echo "submitted_at: ${TS}"
         echo "orig_scripts: ${ORIG_SCRIPT_DIR}"
         echo "output_dir:   ${OUTPUT_ROOT}/GLM_output${SAFE_VARIANT:+_${SAFE_VARIANT}}"
-        echo "run_selection: ${RUN_SELECTION_FILE:-<none>}"
     } > "${SNAP_DIR}/submission_info.txt"
 
     echo "============================================"

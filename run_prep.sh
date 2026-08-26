@@ -7,11 +7,6 @@
 #    - Copies motion regressors and event tables
 #    - Creates bilateral ROI masks
 #
-#  Reads the preprocessing derivatives (<DERIV_ROOT>/<DERIV_PREPROC>), not the
-#  raw BIDS directory, and drops the run entity from every name it writes so
-#  the event tables line up. Which run each file came from is recorded in
-#  GLM_runauto/run_manifest.tsv.
-#
 #  All settings are read from pipeline_config.cfg — no editing needed here.
 #
 #  Usage:
@@ -40,7 +35,6 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
 fi
 
 source "$CONFIG_FILE"
-source "${SCRIPT_DIR}/bids_common.sh"
 
 # ---- Validate required config variables ----
 : "${BIDS_ROOT:?ERROR: BIDS_ROOT not set in pipeline_config.cfg}"
@@ -48,19 +42,12 @@ source "${SCRIPT_DIR}/bids_common.sh"
 : "${SPM_DIR:?ERROR: SPM_DIR not set in pipeline_config.cfg}"
 : "${MATLAB_MODULE:=matlab}"
 
-PREPROC_ROOT="$(deriv_preproc)"
-if [[ ! -d "$PREPROC_ROOT" ]]; then
-    echo "ERROR: no preprocessing derivatives at: $PREPROC_ROOT"
-    echo "       Run the preprocessing first (menu option 2, or submit_preproc.sh)."
-    exit 1
-fi
-
 # ---- Create logs directory ----
 mkdir -p "${SCRIPT_DIR}/logs"
 
 echo "============================================"
 echo "  GridCAT Data Preparation"
-echo "  Derivatives: $PREPROC_ROOT"
+echo "  BIDS Root:   $BIDS_ROOT"
 echo "  Output Root: $OUTPUT_ROOT"
 echo "  Config:      $CONFIG_FILE"
 echo "============================================"
@@ -105,7 +92,7 @@ matlab -nodisplay -nosplash -r "\
             excludeTasks = {}; \
         end; \
         prepare_gridcat_directory( \
-            '${PREPROC_ROOT}', \
+            '${BIDS_ROOT}', \
             '${OUTPUT_ROOT}', \
             'ExcludeTasks', excludeTasks, \
             'FuncPrefix', '${FUNC_PREFIX:-u}', \

@@ -12,30 +12,15 @@
 #    4. fslmaths — apply the mask, giving a brain-only pseudo-magnitude
 #    5. fsl_prepare_fieldmap — unwrap the phase and write a fieldmap in rad/s
 #
-#  Outputs land in the fieldmap derivatives dataset with BIDS "Case 3" names,
-#  so the preprocessing picks them up without any renaming:
+#  Outputs land in the session's fmap/ directory with BIDS "Case 3" names, so
+#  the preprocessing picks them up without any renaming:
 #
-#    <DERIV_ROOT>/<DERIV_FIELDMAPS>/<sub>/<ses>/fmap/
-#        <sub>_<ses>[_run-N]_fieldmap.nii[.gz]    the fieldmap, in rad/s
-#        <sub>_<ses>[_run-N]_magnitude.nii[.gz]   the brain-only magnitude
-#        <sub>_<ses>[_run-N]_fieldmap.json        units, IntendedFor, provenance
-#
-#  They go there rather than into BIDS_ROOT/…/fmap because they are derived
-#  data, and because nothing in this pipeline writes into the raw BIDS tree.
-#  The preprocessing searches the derivative first and the raw fmap/ second, so
-#  fieldmaps made by an older version keep working.
-#
-#  This dataset survives a preprocessing re-run: rebuilding a fieldmap means
-#  another FSL pass, so it is only redone when you ask with --force.
+#    fmap/<sub>_<ses>[_run-N]_fieldmap.nii[.gz]    the fieldmap, in rad/s
+#    fmap/<sub>_<ses>[_run-N]_magnitude.nii[.gz]   the brain-only magnitude
+#    fmap/<sub>_<ses>[_run-N]_fieldmap.json        units, IntendedFor, provenance
 #
 #  Then set PREPROC_MODE=precalc_fieldmap in pipeline_config.cfg and run the
 #  preprocessing as usual.
-#
-#  When a session has several phasediffs and several T1w runs, each phasediff
-#  is paired with the T1w carrying the same run entity; failing that, with the
-#  one acquired closest in time to it. Pairing by position in a sorted list
-#  would silently mix a structural from one visit to the scanner with a
-#  phasediff from another.
 #
 #  Usage:
 #    bash make_fieldmaps.sh                     # every session in subses_list.txt
@@ -110,15 +95,8 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     exit 1
 fi
 source "$CONFIG_FILE"
-# shellcheck disable=SC1091
-source "${SELF_DIR}/bids_common.sh"
 
 : "${BIDS_ROOT:?ERROR: BIDS_ROOT not set in pipeline_config.cfg}"
-
-FMAP_DERIV="$(deriv_fieldmaps)" || {
-    err "Cannot resolve the derivatives root — set OUTPUT_ROOT or DERIV_ROOT."
-    exit 1
-}
 
 [[ -z "$LIST" ]]       && LIST="${SCRIPT_DIR:-$SELF_DIR}/subses_list.txt"
 [[ -z "$MAG_SOURCE" ]] && MAG_SOURCE="${FIELDMAP_MAGNITUDE_SOURCE:-structural}"
@@ -204,80 +182,6 @@ first_existing() {
     return 1
 }
 
-# select_t1w_for <anatdir> <sub> <ses> <phasediff-stem> <phasediff-path>
-#
-# The T1w that belongs with this phase difference, in order of preference:
-#   1. run_selection.tsv, if it names a T1w run for this session
-#   2. the T1w carrying the same run entity as the phasediff
-#   3. the T1w acquired closest in time to the phasediff (JSON sidecars)
-#   4. the highest run number, with a warning
-#
-# Steps 2 and 3 are what keeps a structural from the subject's first visit to
-# the scanner from being resampled into a phasediff acquired after they got
-# back in: the run counters restart independently, so equal run numbers prove
-# nothing.
-select_t1w_for() {
-    local anatdir="$1" sub="$2" ses="$3" stem="$4" phase="$5"
-    local -a candidates=()
-    local f sel run_ent anchor nearest gap
-
-    while IFS= read -r f; do
-        [[ -n "$f" ]] && candidates+=("$f")
-    done < <(find "$anatdir" -maxdepth 1 \
-                  \( -name "${sub}_${ses}*_T1w.nii" -o -name "${sub}_${ses}*_T1w.nii.gz" \) \
-                  2>/dev/null | sort)
-
-    [[ ${#candidates[@]} -eq 0 ]] && return 1
-    if [[ ${#candidates[@]} -eq 1 ]]; then
-        printf '%s' "${candidates[0]}"
-        return 0
-    fi
-
-    # 1. An explicit choice
-    sel="$(run_selection_get "$(run_selection_file)" "$sub" "$ses" T1w)" || sel=""
-    if [[ -n "$sel" ]]; then
-        for f in "${candidates[@]}"; do
-            if [[ "$(bids_run_label "$f")" == "$sel" ]]; then
-                info "T1w: ${sel} (from run_selection.tsv)" >&2
-                printf '%s' "$f"
-                return 0
-            fi
-        done
-        warn "run_selection.tsv asks for ${sel} for the T1w, but no such file exists" >&2
-    fi
-
-    # 2. Same run entity as the phasediff
-    run_ent=""
-    [[ "$stem" =~ _(run-[A-Za-z0-9]+) ]] && run_ent="${BASH_REMATCH[1]}"
-    if [[ -n "$run_ent" ]]; then
-        for f in "${candidates[@]}"; do
-            if [[ "$(bids_run_label "$f")" == "$run_ent" ]]; then
-                info "T1w: ${run_ent} (same run entity as the phasediff)" >&2
-                printf '%s' "$f"
-                return 0
-            fi
-        done
-    fi
-
-    # 3. Acquired closest to the phasediff
-    anchor="$(acq_seconds "$phase")" || anchor=""
-    if [[ -n "$anchor" ]]; then
-        if nearest="$(pick_nearest "$anchor" "${candidates[@]}")"; then
-            gap="$(printf '%s' "$nearest" | sed -n 2p)"
-            nearest="$(printf '%s' "$nearest" | sed -n 1p)"
-            info "T1w: $(basename "$nearest") (acquired $(python3 -c "print('%.0f' % (float('$gap')/60))") min from the phasediff)" >&2
-            printf '%s' "$nearest"
-            return 0
-        fi
-    fi
-
-    # 4. Nothing to go on
-    warn "${#candidates[@]} T1w runs and nothing says which belongs with ${stem}." >&2
-    warn "  Using the highest run number. Add a T1w row to run_selection.tsv to decide." >&2
-    printf '%s' "${candidates[${#candidates[@]}-1]}"
-    return 0
-}
-
 # ---- Build the list of subject-sessions to process ----
 declare -a TARGETS=()
 if [[ -n "$SUB_ARG" ]]; then
@@ -298,8 +202,7 @@ printf "\n"
 printf "${BLUE}=============================================${NC}\n"
 printf "${BLUE}  Create fieldmaps from structural + phasediff${NC}\n"
 printf "${BLUE}=============================================${NC}\n"
-printf "  BIDS root (read): %s\n" "$BIDS_ROOT"
-printf "  Output:           %s\n" "$FMAP_DERIV"
+printf "  BIDS root:        %s\n" "$BIDS_ROOT"
 printf "  Sessions:         %d\n" "${#TARGETS[@]}"
 printf "  Scanner:          %s\n" "$SCANNER"
 printf "  Magnitude source: %s\n" "$MAG_SOURCE"
@@ -319,7 +222,6 @@ for entry in "${TARGETS[@]}"; do
     SESDIR="${BIDS_ROOT}/${SUB}/${SES}"
     FMAPDIR="${SESDIR}/fmap"
     ANATDIR="${SESDIR}/anat"
-    OUTDIR="$(deriv_session "$FMAP_DERIV" "$SUB" "$SES" fmap)"
 
     printf "${BLUE}── %s / %s ──${NC}\n" "$SUB" "$SES"
 
@@ -354,13 +256,13 @@ for entry in "${TARGETS[@]}"; do
             export FSLOUTPUTTYPE=NIFTI;    OUT_EXT=".nii"
         fi
 
-        OUT_FMAP="${OUTDIR}/${stem}_fieldmap${OUT_EXT}"
-        OUT_MAG="${OUTDIR}/${stem}_magnitude${OUT_EXT}"
-        OUT_JSON="${OUTDIR}/${stem}_fieldmap.json"
+        OUT_FMAP="${FMAPDIR}/${stem}_fieldmap${OUT_EXT}"
+        OUT_MAG="${FMAPDIR}/${stem}_magnitude${OUT_EXT}"
+        OUT_JSON="${FMAPDIR}/${stem}_fieldmap.json"
 
         printf "  ${BLUE}%s${NC}\n" "$stem"
 
-        existing="$(first_existing "${OUTDIR}/${stem}_fieldmap.nii" "${OUTDIR}/${stem}_fieldmap.nii.gz" || true)"
+        existing="$(first_existing "${FMAPDIR}/${stem}_fieldmap.nii" "${FMAPDIR}/${stem}_fieldmap.nii.gz" || true)"
         if [[ -n "$existing" && "$FORCE" != "true" ]]; then
             info "fieldmap already exists — skipping (use --force to rebuild)"
             printf "      %s\n" "$existing"
@@ -396,11 +298,8 @@ except Exception:
         fi
 
         # ---- Work directory ----
-        # Under the output, never under the raw fmap/ — the intermediates are
-        # bet/flirt scratch and have no business in the BIDS tree.
-        WORK="${OUTDIR}/.work_${stem}"
+        WORK="${FMAPDIR}/.work_${stem}"
         if [[ "$DRY_RUN_EFF" != "true" ]]; then
-            mkdir -p "$OUTDIR"
             rm -rf "$WORK"; mkdir -p "$WORK"
         fi
 
@@ -425,9 +324,21 @@ except Exception:
             # ---- Build a pseudo-magnitude from the T1w ----
             MAG_KIND="T1w"
 
-            # Which T1w belongs with THIS phasediff. Getting it wrong warps the
-            # fieldmap to a head position the phase was never measured in.
-            T1W="$(select_t1w_for "$ANATDIR" "$SUB" "$SES" "$stem" "$PHASE")" || T1W=""
+            # Prefer a T1w carrying the same run entity as this phasediff
+            RUN_ENT=""
+            [[ "$stem" =~ (_run-[A-Za-z0-9]+) ]] && RUN_ENT="${BASH_REMATCH[1]}"
+
+            T1W=""
+            if [[ -n "$RUN_ENT" ]]; then
+                T1W="$(first_existing \
+                    "${ANATDIR}/${SUB}_${SES}${RUN_ENT}_T1w.nii" \
+                    "${ANATDIR}/${SUB}_${SES}${RUN_ENT}_T1w.nii.gz" || true)"
+            fi
+            if [[ -z "$T1W" ]]; then
+                # Otherwise the last T1w in sorted order, matching how the
+                # pipeline picks a T2w when several runs exist.
+                T1W=$(find "$ANATDIR" -maxdepth 1 \( -name "${SUB}_${SES}*_T1w.nii" -o -name "${SUB}_${SES}*_T1w.nii.gz" \) 2>/dev/null | sort | tail -1)
+            fi
 
             if [[ -z "$T1W" ]]; then
                 err "no ${SUB}_${SES}*_T1w.nii[.gz] in ${ANATDIR}"
@@ -480,8 +391,8 @@ except Exception:
 
         # Remove any previous output in the other compression, so the session
         # never ends up with both a .nii and a .nii.gz fieldmap.
-        rm -f "${OUTDIR}/${stem}_fieldmap.nii" "${OUTDIR}/${stem}_fieldmap.nii.gz" \
-              "${OUTDIR}/${stem}_magnitude.nii" "${OUTDIR}/${stem}_magnitude.nii.gz"
+        rm -f "${FMAPDIR}/${stem}_fieldmap.nii" "${FMAPDIR}/${stem}_fieldmap.nii.gz" \
+              "${FMAPDIR}/${stem}_magnitude.nii" "${FMAPDIR}/${stem}_magnitude.nii.gz"
 
         mv "$FMAP_SRC" "$OUT_FMAP"
         mv "$MAGB_SRC" "$OUT_MAG"
@@ -542,10 +453,7 @@ printf "  Created: ${GREEN}%d${NC}   Skipped: ${YELLOW}%d${NC}   Failed: ${RED}%
 printf "${BLUE}=============================================${NC}\n"
 
 if [[ "$N_MADE" -gt 0 && "$DRY_RUN_EFF" != "true" ]]; then
-    write_dataset_description "$FMAP_DERIV" "${DERIV_FIELDMAPS:-fieldmaps}" \
-        "B0 fieldmaps built from T1w + phasediff with FSL (make_fieldmaps.sh)"
-    printf "\nWritten to: ${BLUE}%s${NC}\n" "$FMAP_DERIV"
-    printf "Next: set ${BLUE}PREPROC_MODE=precalc_fieldmap${NC} in pipeline_config.cfg,\n"
+    printf "\nNext: set ${BLUE}PREPROC_MODE=precalc_fieldmap${NC} in pipeline_config.cfg,\n"
     printf "then run the preprocessing (menu option 2, or bash submit_preproc.sh).\n"
 fi
 

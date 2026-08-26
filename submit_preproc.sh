@@ -34,21 +34,8 @@
 #    --list FILE     Subject-session list (default: <script dir>/subses_list.txt).
 #    --config FILE   Config file (default: <script dir>/pipeline_config.cfg).
 #    --dependency D  SLURM dependency spec, e.g. afterok:12345.
-#    --keep-deriv    Do not clear the preprocessing derivatives first.
 #    --dry-run       Print the command that would run, then stop.
 #    -h, --help      Show this help.
-#
-#  CLEARING THE DERIVATIVES
-#  ------------------------
-#  A run that starts the preprocessing from its beginning wipes
-#  <DERIV_ROOT>/<DERIV_PREPROC> before submitting, so the result cannot be a
-#  mixture of this run and the last one — including sessions that have since
-#  been filtered out of the subject list. Resumed runs (--stages smooth and
-#  friends) leave it alone, because that is what they read.
-#
-#  Submitting for a single --sub/--ses only clears that session, so the other
-#  subjects' output survives. DERIV_RESET=never in the config, or --keep-deriv
-#  here, turns the clearing off entirely.
 # =============================================================================
 
 set -euo pipefail
@@ -66,7 +53,6 @@ ARRAY=""
 DEPENDENCY=""
 RUN_LOCAL=false
 DRY_RUN_SUBMIT=false
-KEEP_DERIV=false
 
 show_help() {
     awk 'NR>1 { if ($0 !~ /^#/) exit; print }' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
@@ -82,7 +68,6 @@ while [[ $# -gt 0 ]]; do
         --array)      ARRAY="$2";      shift 2 ;;
         --dependency) DEPENDENCY="$2"; shift 2 ;;
         --local)      RUN_LOCAL=true;  shift ;;
-        --keep-deriv) KEEP_DERIV=true; shift ;;
         --dry-run)    DRY_RUN_SUBMIT=true; shift ;;
         -h|--help)    show_help; exit 0 ;;
         *)
@@ -97,7 +82,6 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     exit 1
 fi
 source "$CONFIG_FILE"
-source "${SELF_DIR}/bids_common.sh"
 
 : "${BIDS_ROOT:?ERROR: BIDS_ROOT not set in pipeline_config.cfg}"
 
@@ -139,32 +123,6 @@ if [[ "$RUN_LOCAL" == "true" && -z "$SUB" ]]; then
     echo "ERROR: --local needs --sub and --ses (it processes one session at a time)." >&2
     exit 1
 fi
-
-# =============================================================================
-#  Clear the derivatives of everything this submission is about to redo
-# =============================================================================
-# Done here, in one process, rather than inside the array tasks: only the
-# submitter knows the whole list, so only it can drop sessions that are no
-# longer in it. The array tasks clear their own session as well, which is what
-# makes a standalone --local run behave the same way.
-maybe_reset_derivatives() {
-    [[ "$KEEP_DERIV" == "true" ]] && return 0
-    deriv_reset_wanted "$STAGES" "${PREPROC_MODE:-}" || return 0
-
-    local target
-    if [[ -n "$SUB" ]]; then
-        target="$(deriv_session "$(deriv_preproc)" "$SUB" "$SES")"
-    else
-        target="$(deriv_preproc)"
-    fi
-
-    if [[ "$DRY_RUN_SUBMIT" == "true" ]]; then
-        echo "(dry run) would clear: ${target}"
-        return 0
-    fi
-
-    reset_preproc_deriv ${SUB:+"$SUB" "$SES"}
-}
 
 # =============================================================================
 #  Local run — one session, in this shell
@@ -237,16 +195,12 @@ echo "  Mode:     ${PREPROC_MODE:-<not set>}"
 echo "  Array:    ${ARRAY}   (${n_jobs} session(s) in the list)"
 echo "  Job name: ${job_name}"
 echo "  Config:   ${CONFIG_FILE}"
-echo "  Output:   $(deriv_preproc)"
 echo "============================================"
 
 if [[ "$DRY_RUN_SUBMIT" == "true" ]]; then
-    maybe_reset_derivatives
     echo "sbatch ${sbatch_args[*]} ${SBATCH_SCRIPT} ${job_args[*]}"
     echo "(dry run — not submitting)"
     exit 0
 fi
-
-maybe_reset_derivatives
 
 sbatch "${sbatch_args[@]}" "$SBATCH_SCRIPT" "${job_args[@]}"

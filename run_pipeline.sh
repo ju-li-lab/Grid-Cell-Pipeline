@@ -199,11 +199,6 @@ source_config() {
         print_error "Failed to source configuration file"
         return 1
     fi
-    # Shared derivative-path and BIDS helpers (see bids_common.sh)
-    if [[ -f "${SCRIPT_DIR}/bids_common.sh" ]]; then
-        # shellcheck disable=SC1090
-        source "${SCRIPT_DIR}/bids_common.sh"
-    fi
     return 0
 }
 
@@ -359,46 +354,18 @@ run_step_2() {
     local job_name="spm_preproc"
     [[ "${stages}" != "all" ]] && job_name="spm_${stages//,/_}"
 
-    # A run that starts the preprocessing from its beginning replaces the
-    # previous output wholesale, so say what is about to disappear before
-    # asking. A resumed run reads that output and must keep it.
-    local deriv_dir will_reset=false
-    deriv_dir="$(deriv_preproc 2>/dev/null || echo '')"
-    if [[ -n "${deriv_dir}" ]] && deriv_reset_wanted "${stages}" "${PREPROC_MODE:-}"; then
-        will_reset=true
-    fi
-
     print_info "This step will submit preprocessing jobs to the HPC cluster."
     printf "  Script:    spm_preproc_array.sbatch\n"
     printf "  Stages:    ${stages}\n"
     printf "  Mode:      ${PREPROC_MODE:-<not set>}\n"
     printf "  Array size: 1-%d (one job per subject/session)\n" "${num_subjects}"
     printf "  Subjects/sessions: %d\n" "${num_subjects}"
-    printf "  Output:    ${deriv_dir:-<derivatives root not resolvable>}\n"
-    if [[ "${will_reset}" == "true" ]]; then
-        if [[ -d "${deriv_dir}" ]]; then
-            printf "  ${YELLOW}Existing derivatives there will be DELETED first${NC}\n"
-            printf "             (%s)\n" "$(du -sh "${deriv_dir}" 2>/dev/null | cut -f1 || echo 'size unknown')"
-        fi
-        printf "             Raw BIDS in ${BIDS_ROOT} is not touched.\n"
-    else
-        printf "  Existing derivatives are kept (resuming, or DERIV_RESET=never)\n"
-    fi
     printf "\nThese jobs will run in parallel on the cluster.\n"
     printf "Processing time depends on your data size and cluster availability.\n\n"
 
     if ! ask_confirmation "Submit Step 2 preprocessing jobs?"; then
         print_info "Step 2 skipped."
         return 0
-    fi
-
-    if [[ "${will_reset}" == "true" ]]; then
-        printf "\n"
-        if ! reset_preproc_deriv; then
-            print_error "Could not clear the preprocessing derivatives."
-            return 1
-        fi
-        log_message "INFO" "Cleared preprocessing derivatives: ${deriv_dir}"
     fi
 
     printf "\n"
@@ -693,13 +660,11 @@ show_main_menu() {
     printf "  ${BLUE}[4]${NC}  Run GridCAT analysis (SLURM)\n\n"
 
     printf "Data Preparation:\n"
-    printf "  ${BLUE}[M]${NC}  Scan for multi-run cases, write run_selection.tsv\n"
-    printf "  ${BLUE}[R]${NC}  Import ROI masks into the derivatives (dry-run)\n"
-    printf "  ${BLUE}[RX]${NC} Import ROI masks into the derivatives (execute)\n"
+    printf "  ${BLUE}[M]${NC}  Scan for multi-run cases (T2w/BOLD)\n"
+    printf "  ${BLUE}[R]${NC}  Move ROI masks into BIDS (dry-run)\n"
+    printf "  ${BLUE}[RX]${NC} Move ROI masks into BIDS (execute)\n"
     printf "  ${BLUE}[B]${NC}  Build fieldmaps from T1w + phasediff (dry-run)\n"
-    printf "  ${BLUE}[BX]${NC} Build fieldmaps from T1w + phasediff (execute)\n"
-    printf "  ${BLUE}[K]${NC}  Clean old pipeline output out of BIDS_ROOT (dry-run)\n"
-    printf "  ${BLUE}[KX]${NC} Clean old pipeline output out of BIDS_ROOT (execute)\n\n"
+    printf "  ${BLUE}[BX]${NC} Build fieldmaps from T1w + phasediff (execute)\n\n"
 
     printf "Batch Operations:\n"
     printf "  ${BLUE}[A]${NC}  Run ALL steps (0→1 locally, then 2→3→4 chained on SLURM)\n"
@@ -721,9 +686,7 @@ show_settings() {
     fi
 
     printf "${BLUE}Data Paths:${NC}\n"
-    printf "  BIDS Directory:        ${BIDS_ROOT:-<not set>}  ${BLUE}(read only)${NC}\n"
-    printf "  Derivatives:           $(deriv_preproc 2>/dev/null || echo '<not resolvable>')\n"
-    printf "  Reset derivatives:     ${DERIV_RESET:-auto}\n"
+    printf "  BIDS Directory:        ${BIDS_ROOT:-<not set>}\n"
     printf "  Subject/Session List:  ${SCRIPT_DIR}/subses_list.txt\n"
     printf "  Output Directory:      ${OUTPUT_ROOT:-<not set>}\n"
     printf "  SPM Directory:         ${SPM_DIR:-<not set>}\n"
@@ -1043,34 +1006,10 @@ main() {
                 printf "\nPress Enter to continue..."
                 read -r
                 ;;
-            [Kk][Xx])
-                print_header "Clean Old Pipeline Output out of BIDS_ROOT (EXECUTE)"
-                printf "${YELLOW}This deletes preprocessing files that earlier versions wrote${NC}\n"
-                printf "${YELLOW}into ${BIDS_ROOT}.${NC}\n"
-                printf "${YELLOW}Raw scans, sidecars and anything else are left alone.${NC}\n"
-                printf "Run [K] first to see the list. Are you sure? (y/N): "
-                read -r confirm
-                if [[ "${confirm}" =~ ^[Yy]$ ]]; then
-                    log_message "INFO" "Cleaning pipeline leftovers from BIDS_ROOT (execute)"
-                    bash "${SCRIPT_DIR}/clean_bids_leftovers.sh" --execute 2>&1 | tee -a "$LOG_FILE"
-                else
-                    print_info "Cancelled."
-                fi
-                printf "\nPress Enter to continue..."
-                read -r
-                ;;
-            [Kk])
-                print_header "Clean Old Pipeline Output out of BIDS_ROOT (dry-run)"
-                log_message "INFO" "Listing pipeline leftovers in BIDS_ROOT"
-                bash "${SCRIPT_DIR}/clean_bids_leftovers.sh" 2>&1 | tee -a "$LOG_FILE"
-                printf "\nPress Enter to continue..."
-                read -r
-                ;;
             [Bb][Xx])
                 print_header "Build Fieldmaps from Structural (EXECUTE)"
                 printf "${YELLOW}This runs FSL (bet/flirt/fsl_prepare_fieldmap) and writes${NC}\n"
-                printf "${YELLOW}new *_fieldmap / *_magnitude files into the fieldmap${NC}\n"
-                printf "${YELLOW}derivatives — BIDS_ROOT is not touched.${NC}\n"
+                printf "${YELLOW}new *_fieldmap / *_magnitude files into each session's fmap/.${NC}\n"
                 printf "Are you sure? (y/N): "
                 read -r confirm
                 if [[ "${confirm}" =~ ^[Yy]$ ]]; then
@@ -1090,9 +1029,8 @@ main() {
                 read -r
                 ;;
             [Rr][Xx])
-                print_header "Import ROI Masks (EXECUTE)"
-                printf "${YELLOW}This copies and renames ROI files into the ROI derivatives${NC}\n"
-                printf "${YELLOW}dataset — BIDS_ROOT is not touched.${NC}\n"
+                print_header "Move ROI Masks (EXECUTE)"
+                printf "${YELLOW}This will copy and rename ROI files into BIDS anat/ folders.${NC}\n"
                 printf "Are you sure? (y/N): "
                 read -r confirm
                 if [[ "${confirm}" =~ ^[Yy]$ ]]; then
@@ -1105,7 +1043,7 @@ main() {
                 read -r
                 ;;
             [Rr])
-                print_header "Import ROI Masks (dry-run)"
+                print_header "Move ROI Masks (dry-run)"
                 log_message "INFO" "Running ROI mover (dry-run)"
                 bash "${SCRIPT_DIR}/move_rois.sh" 2>&1 | tee -a "$LOG_FILE"
                 printf "\nPress Enter to continue..."
@@ -1117,7 +1055,7 @@ main() {
                 exit 0
                 ;;
             *)
-                print_error "Invalid choice. Please enter 0-4, 2S, F, A, S, C, L, M, R, RX, B, BX, K, KX, or Q."
+                print_error "Invalid choice. Please enter 0-4, 2S, F, A, S, C, L, M, R, RX, B, BX, or Q."
                 printf "\nPress Enter to continue..."
                 read -r
                 ;;

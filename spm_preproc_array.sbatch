@@ -16,10 +16,6 @@
 #  Or use submit_preproc.sh / run_pipeline.sh, which fill in the SLURM resource
 #  flags from pipeline_config.cfg for you.
 #
-#  Output goes to <DERIV_ROOT>/<DERIV_PREPROC>/<sub>/<ses>/, never into
-#  BIDS_ROOT. A stage list that starts the preprocessing from its beginning
-#  clears that directory first; see DERIV_RESET in pipeline_config.cfg.
-#
 #  Options:
 #    --stages LIST   Preprocessing stages to run (default: PREPROC_STAGES from
 #                    the config, or "all"). See PREPROC_STAGES in the config for
@@ -82,13 +78,6 @@ fi
 # Sourcing sets SCRIPT_DIR (and PREPROC_STAGES) from the config file.
 source "$CONFIG_FILE"
 
-# Derivative path helpers, for the banner below. The MATLAB side resolves the
-# same paths itself from the config, so this is only for the log.
-if [[ -f "${BOOT_DIR}/bids_common.sh" ]]; then
-    # shellcheck disable=SC1091
-    source "${BOOT_DIR}/bids_common.sh"
-fi
-
 # ---- Validate required config variables ----
 : "${BIDS_ROOT:?ERROR: BIDS_ROOT not set in pipeline_config.cfg}"
 : "${SCRIPT_DIR:?ERROR: SCRIPT_DIR not set in pipeline_config.cfg}"
@@ -146,10 +135,6 @@ echo "  Session: $SES"
 echo "  Stages:  $STAGES"
 echo "  Mode:    ${PREPROC_MODE:-<not set>}"
 echo "  Config:  $CONFIG_FILE"
-echo "  Reads:   ${BIDS_ROOT}/${SUB}/${SES}   (never written to)"
-if declare -f deriv_session >/dev/null 2>&1; then
-    echo "  Writes:  $(deriv_session "$(deriv_preproc)" "$SUB" "$SES" 2>/dev/null || echo '<derivatives root not resolvable>')"
-fi
 echo "============================================"
 echo ""
 

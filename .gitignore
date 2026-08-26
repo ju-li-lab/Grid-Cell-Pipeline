@@ -9,14 +9,6 @@
 /derivatives/
 /outputs/
 *.log
-run_selection.tsv
-subses_list.txt
-subses_list_full.txt
-/runs/
-
-# Python
-__pycache__/
-*.pyc
 
 # MATLAB
 *.asv

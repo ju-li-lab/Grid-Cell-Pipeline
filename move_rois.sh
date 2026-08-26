@@ -2,18 +2,8 @@
 # ======================================================================
 # MOVE_ROIS.SH
 # ======================================================================
-# Imports ROI masks from a source directory into the ROI derivatives
-# dataset, renaming them to match the pipeline's ROI_PATTERN.
-#
-#   <DERIV_ROOT>/<DERIV_ROIS>/sub-XX/ses-YY/anat/
-#
-# They go there rather than into BIDS_ROOT because a hand-drawn mask is
-# derived data, and because the raw BIDS directory is left untouched by
-# every part of this pipeline. The preprocessing looks here first and
-# falls back to BIDS anat/, so masks imported the old way keep working.
-#
-# This dataset is NOT cleared when the preprocessing re-runs: the masks
-# come from manual segmentation and re-importing them is your decision.
+# Copies ROI masks from a source directory into the correct BIDS
+# anat/ folders, renaming them to match the pipeline's ROI_PATTERN.
 #
 # Source files are expected to follow the naming convention:
 #   sub-XX_ses-YY_[run-N_]<LABEL>_<hemi>.nii[.gz]
@@ -21,17 +11,10 @@
 #   sub-01s13_ses-01_ErC_left.nii.gz
 #   sub-04s13_ses-01_run-2_ErC_left.nii.gz
 #
-# Target names use the ROI_PATTERN_LEFT / ROI_PATTERN_RIGHT from config,
-# keeping the run entity when the source has one:
-#   sub-XX_ses-YY[_run-N]_<ROI_PATTERN_LEFT>
+# Target names use the ROI_PATTERN_LEFT / ROI_PATTERN_RIGHT from config:
+#   sub-XX_ses-YY_<ROI_PATTERN_LEFT>
 # e.g.:
 #   sub-01s13_ses-01_hemi-left_label-ErC_mask.nii
-#   sub-04s13_ses-01_run-2_hemi-left_label-ErC_mask.nii
-#
-# The run entity matters: a mask is drawn on one particular structural, so
-# a mask from run-2 is only valid for the run-2 anatomy. Keeping the entity
-# lets the preprocessing pair the mask with the T2w it selected instead of
-# reaching for whichever mask it finds first.
 #
 # The script can also decompress .nii.gz to .nii if the pipeline
 # expects uncompressed NIfTI files.
@@ -39,7 +22,6 @@
 # Usage:
 #   bash move_rois.sh              # dry-run (preview)
 #   bash move_rois.sh --execute    # actually copy and rename
-#   bash move_rois.sh --force -x   # overwrite masks already imported
 #
 # All settings come from pipeline_config.cfg.
 # ======================================================================
@@ -67,7 +49,6 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
 fi
 
 source "$CONFIG_FILE"
-source "${SCRIPT_DIR}/bids_common.sh"
 
 # Check required config
 for var in BIDS_ROOT ROI_SOURCE_DIR ROI_SOURCE_LABEL ROI_PATTERN_LEFT ROI_PATTERN_RIGHT; do
@@ -90,38 +71,19 @@ fi
 # Parse arguments
 DRY_RUN=1
 DECOMPRESS=0
-FORCE=0
-for arg in "$@"; do
-    case "$arg" in
-        --execute|-x) DRY_RUN=0 ;;
-        --force)      FORCE=1 ;;
-        -h|--help)
-            awk 'NR>1 { if ($0 !~ /^#/) exit; print }' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
-            exit 0 ;;
-        *)
-            echo -e "${RED}ERROR: unknown option: $arg${NC}" >&2
-            exit 1 ;;
-    esac
-done
-
-if [[ -z "${OUTPUT_ROOT:-}" && -z "${DERIV_ROOT:-}" ]]; then
-    echo -e "${RED}ERROR: set OUTPUT_ROOT (or DERIV_ROOT) in $CONFIG_FILE${NC}" >&2
-    echo "       The masks are imported into the derivatives, which live there." >&2
-    exit 1
+if [[ "${1:-}" == "--execute" ]] || [[ "${1:-}" == "-x" ]]; then
+    DRY_RUN=0
 fi
-ROI_DERIV="$(deriv_rois)"
-
 # Check if ROI patterns end in .nii (not .nii.gz) — need decompression
 if [[ "$ROI_PATTERN_LEFT" == *.nii ]] && [[ "$ROI_PATTERN_LEFT" != *.nii.gz ]]; then
     DECOMPRESS=1
 fi
 
 echo "========================================"
-echo "  ROI Mask Importer"
+echo "  ROI Mask Mover"
 echo "========================================"
 echo "Source:       $ROI_SOURCE_DIR"
-echo "Target:       $ROI_DERIV"
-echo "BIDS (read):  $BIDS_ROOT"
+echo "BIDS target:  $BIDS_ROOT"
 echo "ROI label:    $ROI_SOURCE_LABEL"
 echo "Pattern L:    $ROI_PATTERN_LEFT"
 echo "Pattern R:    $ROI_PATTERN_RIGHT"
@@ -199,23 +161,13 @@ process_roi() {
         right|rh|R) hemi="right" ;;
     esac
 
-    # Keep the run entity, when the source carries one. A mask is drawn on one
-    # particular structural, so it is only valid for that run's anatomy.
-    run_part=""
-    if [[ "$base_noext" =~ _(run-[A-Za-z0-9]+) ]]; then
-        run_part="_${BASH_REMATCH[1]}"
-    fi
-
-    # The session must exist in the raw BIDS data — a mask for a session that
-    # was never scanned is a naming mistake worth catching here.
-    if [[ ! -d "$BIDS_ROOT/$sub/$ses" ]]; then
-        echo -e "  ${YELLOW}[SKIP]${NC} No $sub/$ses in BIDS_ROOT (from $base)"
+    # Check target anat directory
+    local target_dir="$BIDS_ROOT/$sub/$ses/anat"
+    if [[ ! -d "$target_dir" ]]; then
+        echo -e "  ${YELLOW}[SKIP]${NC} No anat/ dir: $target_dir (from $base)"
         ((skipped++)) || true
         return
     fi
-
-    local target_dir
-    target_dir="$(deriv_session "$ROI_DERIV" "$sub" "$ses" anat)"
 
     # Build target filename
     local target_pattern
@@ -225,13 +177,12 @@ process_roi() {
         target_pattern="$ROI_PATTERN_RIGHT"
     fi
 
-    local target_name="${sub}_${ses}${run_part}${target_pattern}"
+    local target_name="${sub}_${ses}${target_pattern}"
     local target_path="$target_dir/$target_name"
 
     # Check if target already exists
-    if [[ -f "$target_path" && $FORCE -eq 0 ]]; then
+    if [[ -f "$target_path" ]]; then
         echo -e "  ${BLUE}[EXISTS]${NC} $target_path"
-        echo -e "           (use --force to overwrite)"
         ((skipped++)) || true
         return
     fi
@@ -244,13 +195,12 @@ process_roi() {
             echo -e "  ${BLUE}[DRY]${NC} copy: $base → $target_name"
         fi
     else
-        mkdir -p "$target_dir"
         if [[ $DECOMPRESS -eq 1 ]] && [[ "$ext" == ".nii.gz" ]]; then
             # Decompress to target
             gunzip -c "$src_file" > "$target_path"
             echo -e "  ${GREEN}[OK]${NC} Decompressed: $base → $target_name"
         else
-            cp -f "$src_file" "$target_path"
+            cp -n "$src_file" "$target_path"
             echo -e "  ${GREEN}[OK]${NC} Copied: $base → $target_name"
         fi
     fi
@@ -302,9 +252,5 @@ fi
 if [[ $DRY_RUN -eq 1 ]]; then
     echo -e "${YELLOW}This was a dry run. To actually copy files, run:${NC}"
     echo "  bash $0 --execute"
-elif [[ $copied -gt 0 ]]; then
-    write_dataset_description "$ROI_DERIV" "${DERIV_ROIS:-rois}" \
-        "ROI masks imported from ${ROI_SOURCE_DIR}"
-    echo "Masks imported into: $ROI_DERIV"
 fi
 echo ""

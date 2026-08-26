@@ -372,29 +372,11 @@ rpFolders = {rpAll.folder};
 funcNames   = {funcAll.name};
 funcFolders = {funcAll.folder};
 
-% --- Which run of each task was preprocessed --------------------------------
-% prepare_gridcat_directory.m flattens one run per task into GLM_runauto and
-% records which one in run_manifest.tsv. Event tables are matched against that:
-% a table naming a run the pipeline did not preprocess is not the right table
-% for this data, and a table naming no run at all belongs to whichever run was.
-runManifest = load_run_manifest(fullfile(ROOT_DIR, 'run_manifest.tsv'));
-if runManifest.Count > 0
-    fprintf('Run manifest: %d task entries.\n', runManifest.Count);
-else
-    fprintf(['No run_manifest.tsv in %s — event tables will be matched on\n' ...
-             '  subject/session/task alone. Re-run the GridCAT preparation to\n' ...
-             '  get one.\n'], ROOT_DIR);
-end
-
 % --- Parse each EventData file to build a list of runs ---
-% The run entity is optional and captured separately: event tables are often
-% exported without one.
-patEvent = ['^(?<sub>sub-[^_]+)_(?<ses>ses-[^_]+)_(?<task>task-[A-Za-z0-9]+)' ...
-            '(?<rest>.*)EventData\.txt$'];
+patEvent = '(?<sub>sub-[^_]+)_(?<ses>ses-[^_]+)_(?<task>task-[^_]+).*EventData\.txt$';
 
 runs = struct('sub', {}, 'ses', {}, 'task', {}, ...
               'eventFile', {}, 'addRegFile', {}, 'functionalScans', {});
-claimed = containers.Map('KeyType', 'char', 'ValueType', 'char');
 
 for i = 1:numel(eventFiles)
     tok = regexp(eventFiles(i).name, patEvent, 'names');
@@ -413,60 +395,27 @@ for i = 1:numel(eventFiles)
         end
     end
 
-    taskKey  = sprintf('%s|%s|%s', tok.sub, tok.ses, tok.task);
-    eventRun = run_entity_of(tok.rest);
-
-    % -- Does this event table describe the run that was preprocessed? --
-    if isKey(runManifest, taskKey)
-        usedRun = runManifest(taskKey);
-        if ~isempty(eventRun) && ~strcmp(eventRun, usedRun)
-            fprintf(['  Skipping %s: it is the event table for %s, but %s was\n' ...
-                     '    preprocessed for %s %s %s.\n'], ...
-                    eventFiles(i).name, eventRun, usedRun, tok.sub, tok.ses, tok.task);
-            continue;
-        end
-    end
-
-    % -- Two tables for one task cannot both be right --
-    if isKey(claimed, taskKey)
-        msg = sprintf([ ...
-            'Two event tables claim %s %s %s:\n  %s\n  %s\n' ...
-            'Only one run per task is preprocessed, so only one of these applies.\n' ...
-            'Put the run entity in the filename (..._run-2_EventData.txt) so they\n' ...
-            'can be told apart, or remove the one that does not belong.'], ...
-            tok.sub, tok.ses, tok.task, claimed(taskKey), eventFiles(i).name);
-        if FAIL_ON_MISSING; error(msg); else; warning(msg); end
-        continue;
-    end
-
     run.sub  = tok.sub;
     run.ses  = tok.ses;
     run.task = tok.task;
     run.eventFile = fullfile(eventFiles(i).folder, eventFiles(i).name);
 
     % --- Find motion regressor from pre-indexed list ---
-    % The preparation writes rp_<sub>_<ses>_<task>.txt, so try that exact name
-    % before falling back to a substring search over older layouts.
-    rpWanted = sprintf('rp_%s_%s_%s.txt', tok.sub, tok.ses, tok.task);
-    rpIdx = find(strcmp(rpNames, rpWanted), 1);
-    if isempty(rpIdx)
-        rpToken = sprintf('%s_%s_%s_', tok.sub, tok.ses, tok.task);
-        rpMatch = contains(rpNames, rpToken) | ...
-                  contains(rpNames, sprintf('%s_%s_%s.', tok.sub, tok.ses, tok.task));
-        rpIdx = find(rpMatch);
-    end
+    rpToken = sprintf('%s_%s_%s', tok.sub, tok.ses, tok.task);
+    rpMatch = ~cellfun(@isempty, strfind(rpNames, rpToken));
 
-    if isempty(rpIdx)
+    if ~any(rpMatch)
         msg = sprintf('No motion regressor found for %s %s %s', tok.sub, tok.ses, tok.task);
         if FAIL_ON_MISSING; error(msg); else; warning(msg); continue; end
     end
+    rpIdx = find(rpMatch);
     rpFull = fullfile(rpFolders(rpIdx), rpNames(rpIdx));
     [~, sortIdx] = sort(cellfun(@numel, rpFull));
     run.addRegFile = rpFull{sortIdx(1)};
 
     % --- Find 3D functional volumes from pre-indexed list ---
-    funcToken = sprintf('%s%s_%s_%s_bold', FUNC_PREFIX, tok.sub, tok.ses, tok.task);
-    funcMatch = startsWith(funcNames, [funcToken '_']);
+    funcToken = sprintf('%s%s_%s_%s_bold_', FUNC_PREFIX, tok.sub, tok.ses, tok.task);
+    funcMatch = startsWith(funcNames, funcToken);
 
     if ~any(funcMatch)
         msg = sprintf('No functional scans found for %s %s %s (prefix: %s)', ...
@@ -478,7 +427,6 @@ for i = 1:numel(eventFiles)
     funcFull = sort_by_trailing_number(funcFull);
     run.functionalScans = funcFull(:);
 
-    claimed(taskKey) = eventFiles(i).name;
     runs(end+1) = run; %#ok<AGROW>
 end
 
@@ -800,53 +748,6 @@ function roiPath = find_roi_from_index(roiNames, roiFolders, sub, ses, side, fai
     fullPaths = fullfile(roiFolders(idx), roiNames(idx));
     [~, sortIdx] = sort(cellfun(@numel, fullPaths));
     roiPath = fullPaths{sortIdx(1)};
-end
-
-
-function manifest = load_run_manifest(manifestFile)
-% LOAD_RUN_MANIFEST  Which run of each task the preparation actually used.
-%
-% Returns a containers.Map keyed 'sub|ses|task' -> 'run-2' (or 'no-run').
-% An empty map when the file is absent, which is what an older GLM_runauto
-% looks like; the caller then matches on subject/session/task alone.
-
-manifest = containers.Map('KeyType', 'char', 'ValueType', 'char');
-
-if isempty(manifestFile) || ~isfile(manifestFile)
-    return;
-end
-
-fid = fopen(manifestFile, 'r');
-if fid == -1
-    warning('load_run_manifest:CannotRead', 'Cannot read %s', manifestFile);
-    return;
-end
-
-lineNo = 0;
-while ~feof(fid)
-    line = fgetl(fid);
-    if ~ischar(line), break; end
-    lineNo = lineNo + 1;
-    if lineNo == 1, continue; end            % header
-    if isempty(strtrim(line)), continue; end
-
-    parts = strsplit(line, sprintf('\t'));
-    if numel(parts) < 4, continue; end
-
-    key = sprintf('%s|%s|%s', strtrim(parts{1}), strtrim(parts{2}), strtrim(parts{3}));
-    manifest(key) = strtrim(parts{4});
-end
-fclose(fid);
-end
-
-
-function runLabel = run_entity_of(name)
-% RUN_ENTITY_OF  'run-2' out of a filename fragment, or '' when it has none.
-runLabel = '';
-tok = regexp(name, '_run-([A-Za-z0-9]+)', 'tokens', 'once');
-if ~isempty(tok)
-    runLabel = ['run-' tok{1}];
-end
 end
 
 

@@ -2,118 +2,283 @@
 # ======================================================================
 # SCAN_MULTIRUN.SH
 # ======================================================================
-# Finds every subject/session that holds more than one run of the same
-# scan — T1w, T2w, a task BOLD, a phasediff, a magnitude, a ready-made
-# fieldmap, or the reverse phase-encode EPI — and writes run_selection.tsv
-# so you can say which run the pipeline should use.
+# Scans the BIDS directory for subjects/sessions that have:
+#   - Multiple T2w runs (run-1_T2w, run-2_T2w, ...)
+#   - Multiple runs of the same task BOLD (task-run2_run-1_bold, ...)
+#   - Multiple reverse-PE runs (task-reverse_run-1_bold, ...)
 #
-# It also reads AcquisitionTime out of the JSON sidecars and groups the
-# session's scans into blocks: a subject who climbs out of the scanner and
-# comes back leaves a gap of many minutes, and every run counter restarts
-# independently on the way back in. That is why run-2 of a T2w cannot be
-# assumed to belong with run-2 of a task, and why the suggestion in the file
-# is made per block rather than per run number.
+# Produces run_selection.tsv — a tab-separated file listing every
+# subject-session that has duplicate runs.  The user edits this file
+# to choose which run to use, then the pipeline reads it.
 #
 # Usage:
-#   bash scan_multirun.sh                      # scan everything in BIDS_ROOT
-#   bash scan_multirun.sh --list subses_list.txt
-#   bash scan_multirun.sh --fresh              # discard previous selections
-#   bash scan_multirun.sh path/to/pipeline_config.cfg
-#
-# Options:
-#   --list FILE     Only scan the subject-sessions in this list.
-#   --output FILE   Where to write (default: RUN_SELECTION_FILE, or
-#                   <script dir>/run_selection.tsv).
-#   --gap-minutes N Scans further apart than this are different blocks
-#                   (default: RUN_MATCH_GAP_MIN from the config).
-#   --fresh         Do not carry over the selections already in the file.
-#   -h, --help      Show this help.
+#   bash scan_multirun.sh [path/to/pipeline_config.cfg]
 #
 # Output:
-#   run_selection.tsv, with columns
-#     subject  session  type  available_runs  selected_run
-#     functional_block  runs_detail  notes
-#
-#   selected_run is pre-filled with a suggestion. Check it: runs_detail shows
-#   every run as run-N@HH:MM:SS[block]#series, so a suggestion from the wrong
-#   block is visible at a glance.
+#   <SCRIPT_DIR>/run_selection.tsv
 # ======================================================================
 
 set -euo pipefail
 
+# ======================================================================
+# Setup
+# ======================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-CONFIG_FILE=""
-LIST=""
-OUTPUT=""
-GAP_MIN=""
-KEEP_EXISTING=1
-
-show_help() {
-    awk 'NR>1 { if ($0 !~ /^#/) exit; print }' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
-}
-
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --list)        LIST="$2";     shift 2 ;;
-        --output)      OUTPUT="$2";   shift 2 ;;
-        --gap-minutes) GAP_MIN="$2";  shift 2 ;;
-        --fresh)       KEEP_EXISTING=0; shift ;;
-        -h|--help)     show_help; exit 0 ;;
-        -*)
-            echo "ERROR: Unknown option: $1" >&2
-            echo "       Run with --help to see the accepted options." >&2
-            exit 1 ;;
-        *)
-            CONFIG_FILE="$1"; shift ;;
-    esac
-done
-
-[[ -z "$CONFIG_FILE" ]] && CONFIG_FILE="${SCRIPT_DIR}/pipeline_config.cfg"
+if [[ $# -ge 1 ]]; then
+    CONFIG_FILE="$1"
+else
+    CONFIG_FILE="${SCRIPT_DIR}/pipeline_config.cfg"
+fi
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "ERROR: Config file not found: $CONFIG_FILE" >&2
+    echo "ERROR: Config file not found: $CONFIG_FILE"
     exit 1
 fi
 
-# shellcheck disable=SC1090
 source "$CONFIG_FILE"
-# shellcheck disable=SC1091
-source "${SCRIPT_DIR}/bids_common.sh"
 
 if [[ -z "${BIDS_ROOT:-}" ]] || [[ ! -d "$BIDS_ROOT" ]]; then
-    echo "ERROR: BIDS_ROOT not set or does not exist: ${BIDS_ROOT:-<not set>}" >&2
+    echo "ERROR: BIDS_ROOT not set or does not exist: ${BIDS_ROOT:-<not set>}"
     exit 1
 fi
 
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "ERROR: python3 not found — needed to read the JSON sidecars." >&2
-    exit 1
+OUTPUT_FILE="${SCRIPT_DIR}/run_selection.tsv"
+
+# ======================================================================
+# Colors
+# ======================================================================
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m'
+
+# ======================================================================
+# Scan BIDS directory
+# ======================================================================
+echo "========================================"
+echo "  Multi-Run Scanner"
+echo "========================================"
+echo "BIDS_ROOT: $BIDS_ROOT"
+echo ""
+
+# Track statistics
+declare -i multi_t2w_count=0
+declare -i multi_bold_count=0
+declare -i multi_reverse_count=0
+declare -i multi_fieldmap_count=0
+declare -i total_entries=0
+
+# Start building TSV content
+# Header
+TSV_HEADER="subject\tsession\ttype\tavailable_runs\tselected_run"
+TSV_LINES=()
+
+for sub_dir in "$BIDS_ROOT"/sub-*/; do
+    [[ -d "$sub_dir" ]] || continue
+    SUB=$(basename "$sub_dir")
+
+    for ses_dir in "$sub_dir"/ses-*/; do
+        [[ -d "$ses_dir" ]] || continue
+        SES=$(basename "$ses_dir")
+        anat_dir="$ses_dir/anat"
+        func_dir="$ses_dir/func"
+        fmap_dir="$ses_dir/fmap"
+
+        # ----- Check for multi-run T2w -----
+        if [[ -d "$anat_dir" ]]; then
+            # Find all T2w NIfTI files
+            T2W_FILES=()
+            while IFS= read -r -d '' f; do
+                T2W_FILES+=("$(basename "$f")")
+            done < <(find "$anat_dir" -maxdepth 1 \( -name "*_T2w.nii" -o -name "*_T2w.nii.gz" \) -print0 2>/dev/null)
+
+            if [[ ${#T2W_FILES[@]} -gt 1 ]]; then
+                # Multiple T2w runs found
+                ((multi_t2w_count++)) || true
+                ((total_entries++)) || true
+
+                # Extract run labels
+                runs=""
+                for f in "${T2W_FILES[@]}"; do
+                    # Extract run-N from filename
+                    if [[ "$f" =~ run-([0-9]+) ]]; then
+                        run_label="run-${BASH_REMATCH[1]}"
+                    else
+                        run_label="no-run-label"
+                    fi
+                    if [[ -n "$runs" ]]; then runs+=","; fi
+                    runs+="$run_label"
+                done
+                # Sort runs
+                runs=$(echo "$runs" | tr ',' '\n' | sort | tr '\n' ',' | sed 's/,$//')
+
+                TSV_LINES+=("${SUB}\t${SES}\tT2w\t${runs}\t")
+            fi
+        fi
+
+        # ----- Check for multi-run task BOLD -----
+        if [[ -d "$func_dir" ]]; then
+            # Get unique task labels from BOLD files
+            declare -A task_files
+            while IFS= read -r -d '' f; do
+                fname=$(basename "$f")
+                # Extract task label: everything between task- and the next _bold or _run-
+                if [[ "$fname" =~ task-([^_]+)(_run-[0-9]+)?_bold ]]; then
+                    task_label="${BASH_REMATCH[1]}"
+                    run_part="${BASH_REMATCH[2]:-}"
+
+                    # Skip if this is a reverse-PE EPI (handled separately)
+                    if [[ "$task_label" == "reverse" ]]; then
+                        continue
+                    fi
+
+                    # Track: key = task label, value = list of full filenames
+                    if [[ -v task_files["$task_label"] ]]; then
+                        task_files["$task_label"]+=",$fname"
+                    else
+                        task_files["$task_label"]="$fname"
+                    fi
+                fi
+            done < <(find "$func_dir" -maxdepth 1 \( -name "*_bold.nii" -o -name "*_bold.nii.gz" \) -print0 2>/dev/null)
+
+            # For each task, check if there are multiple runs
+            for task_label in "${!task_files[@]}"; do
+                IFS=',' read -ra files <<< "${task_files[$task_label]}"
+                if [[ ${#files[@]} -gt 1 ]]; then
+                    ((multi_bold_count++)) || true
+                    ((total_entries++)) || true
+
+                    # Extract run labels
+                    runs=""
+                    for f in "${files[@]}"; do
+                        if [[ "$f" =~ _run-([0-9]+)_bold ]]; then
+                            run_label="run-${BASH_REMATCH[1]}"
+                        else
+                            run_label="no-run-label"
+                        fi
+                        if [[ -n "$runs" ]]; then runs+=","; fi
+                        runs+="$run_label"
+                    done
+                    runs=$(echo "$runs" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
+
+                    TSV_LINES+=("${SUB}\t${SES}\ttask-${task_label}\t${runs}\t")
+                fi
+            done
+            unset task_files
+
+            # ----- Check for multi-run reverse-PE -----
+            REVERSE_FILES=()
+            while IFS= read -r -d '' f; do
+                REVERSE_FILES+=("$(basename "$f")")
+            done < <(find "$func_dir" -maxdepth 1 \( -name "*task-reverse*_bold.nii" -o -name "*task-reverse*_bold.nii.gz" \) -print0 2>/dev/null)
+
+            if [[ ${#REVERSE_FILES[@]} -gt 1 ]]; then
+                ((multi_reverse_count++)) || true
+                ((total_entries++)) || true
+
+                runs=""
+                for f in "${REVERSE_FILES[@]}"; do
+                    if [[ "$f" =~ _run-([0-9]+) ]]; then
+                        run_label="run-${BASH_REMATCH[1]}"
+                    else
+                        run_label="no-run-label"
+                    fi
+                    if [[ -n "$runs" ]]; then runs+=","; fi
+                    runs+="$run_label"
+                done
+                runs=$(echo "$runs" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
+
+                TSV_LINES+=("${SUB}\t${SES}\ttask-reverse\t${runs}\t")
+            fi
+        fi
+
+        # ----- Check for multi-run fieldmaps (PREPROC_MODE=precalc_fieldmap) -----
+        # These are what make_fieldmaps.sh writes. The name must start with
+        # <sub>_<ses> so leftovers such as vdm5_*_fieldmap.nii are ignored.
+        if [[ -d "$fmap_dir" ]]; then
+            FIELDMAP_FILES=()
+            while IFS= read -r -d '' f; do
+                FIELDMAP_FILES+=("$(basename "$f")")
+            done < <(find "$fmap_dir" -maxdepth 1 \
+                        \( -name "${SUB}_${SES}*_fieldmap.nii" -o -name "${SUB}_${SES}*_fieldmap.nii.gz" \) \
+                        -print0 2>/dev/null)
+
+            if [[ ${#FIELDMAP_FILES[@]} -gt 1 ]]; then
+                ((multi_fieldmap_count++)) || true
+                ((total_entries++)) || true
+
+                runs=""
+                for f in "${FIELDMAP_FILES[@]}"; do
+                    if [[ "$f" =~ _run-([0-9]+) ]]; then
+                        run_label="run-${BASH_REMATCH[1]}"
+                    else
+                        run_label="no-run-label"
+                    fi
+                    if [[ -n "$runs" ]]; then runs+=","; fi
+                    runs+="$run_label"
+                done
+                runs=$(echo "$runs" | tr ',' '\n' | sort -u | tr '\n' ',' | sed 's/,$//')
+
+                TSV_LINES+=("${SUB}\t${SES}\tfieldmap\t${runs}\t")
+            fi
+        fi
+    done
+done
+
+# ======================================================================
+# Write output
+# ======================================================================
+
+if [[ ${#TSV_LINES[@]} -eq 0 ]]; then
+    echo -e "${GREEN}No multi-run cases found. All subjects/sessions have single runs.${NC}"
+    echo ""
+    echo "No run_selection.tsv needed."
+    exit 0
 fi
 
-[[ -z "$OUTPUT" ]]  && OUTPUT="$(run_selection_file)"
-[[ -z "$GAP_MIN" ]] && GAP_MIN="${RUN_MATCH_GAP_MIN:-20}"
+# Write the TSV
+{
+    echo -e "$TSV_HEADER"
+    for line in "${TSV_LINES[@]}"; do
+        echo -e "$line"
+    done
+} > "$OUTPUT_FILE"
 
-BLUE='\033[0;34m'; NC='\033[0m'
-
-printf "${BLUE}========================================${NC}\n"
-printf "${BLUE}  Multi-Run Scanner${NC}\n"
-printf "${BLUE}========================================${NC}\n"
-printf "  BIDS root:  %s\n" "$BIDS_ROOT"
-printf "  Output:     %s\n" "$OUTPUT"
-printf "  Block gap:  %s minutes\n" "$GAP_MIN"
-[[ -n "$LIST" ]] && printf "  Restricted: %s\n" "$LIST"
-printf "\n"
-
-args=(
-    --bids-root "$BIDS_ROOT"
-    --output "$OUTPUT"
-    --gap-minutes "$GAP_MIN"
-    --reverse-pattern "${TOPUP_REVERSE_PE_PATTERN:-}"
-    --fieldmap-pattern "${FIELDMAP_PATTERN:-_fieldmap}"
-    --magnitude-pattern "${FIELDMAP_MAGNITUDE_PATTERN:-_magnitude}"
-)
-[[ -n "$LIST" ]] && args+=(--list "$LIST")
-[[ "$KEEP_EXISTING" -eq 1 ]] && args+=(--keep-existing)
-
-python3 "${SCRIPT_DIR}/scan_multirun.py" "${args[@]}"
+# ======================================================================
+# Summary
+# ======================================================================
+echo -e "${YELLOW}Multi-run cases found:${NC}"
+echo "  T2w multi-run:       $multi_t2w_count subject-sessions"
+echo "  Task BOLD multi-run: $multi_bold_count subject-session-tasks"
+echo "  Reverse multi-run:   $multi_reverse_count subject-sessions"
+echo "  Fieldmap multi-run:  $multi_fieldmap_count subject-sessions"
+echo ""
+echo "  Total entries:       $total_entries"
+echo ""
+echo -e "${BLUE}Output written to:${NC} $OUTPUT_FILE"
+echo ""
+echo "========================================"
+echo "  WHAT TO DO NEXT"
+echo "========================================"
+echo ""
+echo "1. Open run_selection.tsv in a text editor or spreadsheet program"
+echo "2. For each row, fill in the 'selected_run' column with the run you want"
+echo "   (e.g., 'run-1' or 'run-2')"
+echo "3. Save the file"
+echo "4. The pipeline will use your selections when processing"
+echo ""
+echo "If 'selected_run' is left empty for an entry, the pipeline will:"
+echo "  - For T2w: use the LAST run (highest run number)"
+echo "  - For task BOLD: use the LAST run (highest run number)"
+echo "  - For reverse-PE: use the FIRST run (lowest run number)"
+echo "  - For fieldmap:   use the LAST run (highest run number)"
+echo ""
+echo -e "${YELLOW}Preview of run_selection.tsv:${NC}"
+echo "---"
+column -t -s $'\t' "$OUTPUT_FILE" | head -20
+if [[ $total_entries -gt 19 ]]; then
+    echo "  ... ($((total_entries - 19)) more rows)"
+fi
+echo "---"

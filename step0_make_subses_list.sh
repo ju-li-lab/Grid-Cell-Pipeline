@@ -7,8 +7,7 @@
 #    1. Sources pipeline_config.cfg (auto-detects location)
 #    2. Validates BIDS_ROOT exists
 #    3. Finds all sub-XX/ses-YY pairs with func/ directories
-#    4. Checks for .nii or .nii.gz functional files (raw names only — output
-#       an older version left in the BIDS directory is not counted)
+#    4. Checks for .nii or .nii.gz functional files
 #    5. Discovers available tasks dynamically (no hardcoding)
 #    6. Writes subses_list.txt with format: sub-XX ses-YY
 #    7. Prints clear summary of what was found
@@ -64,9 +63,7 @@ trap "rm -f $TEMP_LIST" EXIT
 # Counter for statistics
 declare -i total_subses=0
 declare -i total_files=0
-# Task labels, one per line. A plain string rather than an associative array so
-# the script also runs on bash 3 (macOS), where "declare -A" does not exist.
-found_tasks=
+declare -A found_tasks
 
 # Find all subject directories (sub-XX)
 while IFS= read -r -d '' sub_dir; do
@@ -83,7 +80,7 @@ while IFS= read -r -d '' sub_dir; do
                 # Check if func directory exists
                 if [[ -d "$ses_dir/func" ]]; then
                     # Check for functional files (.nii or .nii.gz)
-                    nii_count=$(find "$ses_dir/func" -maxdepth 1 \( -name "${sub_id}_*_bold.nii" -o -name "${sub_id}_*_bold.nii.gz" \) 2>/dev/null | wc -l)
+                    nii_count=$(find "$ses_dir/func" -maxdepth 1 \( -name "*_bold.nii" -o -name "*_bold.nii.gz" \) 2>/dev/null | wc -l)
 
                     if [[ $nii_count -gt 0 ]]; then
                         # This is a valid sub-ses pair
@@ -98,16 +95,17 @@ while IFS= read -r -d '' sub_dir; do
 
                             # Extract task label using pattern matching
                             if [[ $filename =~ task-([^_]+) ]]; then
-                                found_tasks="${found_tasks}${BASH_REMATCH[1]}"$'\n'
+                                task="${BASH_REMATCH[1]}"
+                                found_tasks["$task"]=1
                             fi
-                        done < <(find "$ses_dir/func" -maxdepth 1 \( -name "${sub_id}_*_bold.nii" -o -name "${sub_id}_*_bold.nii.gz" \) -print0 2>/dev/null)
+                        done < <(find "$ses_dir/func" -maxdepth 1 \( -name "*_bold.nii" -o -name "*_bold.nii.gz" \) -print0 2>/dev/null)
                     fi
                 fi
             done < <(find "$sub_dir" -maxdepth 1 -type d -name "ses-*" -print0)
         else
             # No sessions, check subject-level func directory
             if [[ -d "$sub_dir/func" ]]; then
-                nii_count=$(find "$sub_dir/func" -maxdepth 1 \( -name "${sub_id}_*_bold.nii" -o -name "${sub_id}_*_bold.nii.gz" \) 2>/dev/null | wc -l)
+                nii_count=$(find "$sub_dir/func" -maxdepth 1 \( -name "*_bold.nii" -o -name "*_bold.nii.gz" \) 2>/dev/null | wc -l)
 
                 if [[ $nii_count -gt 0 ]]; then
                     # Single-session subject
@@ -121,9 +119,10 @@ while IFS= read -r -d '' sub_dir; do
                         filename=$(basename "$filename" .nii)
 
                         if [[ $filename =~ task-([^_]+) ]]; then
-                            found_tasks="${found_tasks}${BASH_REMATCH[1]}"$'\n'
+                            task="${BASH_REMATCH[1]}"
+                            found_tasks["$task"]=1
                         fi
-                    done < <(find "$sub_dir/func" -maxdepth 1 \( -name "${sub_id}_*_bold.nii" -o -name "${sub_id}_*_bold.nii.gz" \) -print0 2>/dev/null)
+                    done < <(find "$sub_dir/func" -maxdepth 1 \( -name "*_bold.nii" -o -name "*_bold.nii.gz" \) -print0 2>/dev/null)
                 fi
             fi
         fi
@@ -143,9 +142,11 @@ echo "  Subject-session pairs found: $total_subses"
 echo "  Total BOLD files: $total_files"
 echo ""
 
-if [[ -n "$found_tasks" ]]; then
+if [[ ${#found_tasks[@]} -gt 0 ]]; then
     echo "  Tasks discovered:"
-    printf '%s' "$found_tasks" | sort -u | sed '/^$/d; s/^/    - /'
+    for task in $(echo "${!found_tasks[@]}" | tr ' ' '\n' | sort); do
+        echo "    - $task"
+    done
     echo ""
 fi
 
