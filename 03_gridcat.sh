@@ -92,6 +92,9 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     echo "  Output:    ${OUTPUT_ROOT}/GLM_output${SAFE_VARIANT:+_${SAFE_VARIANT}}"
     echo "============================================"
 
+    # Optional sbatch flags. Expanded below as ${ARR[@]+"${ARR[@]}"} rather
+    # than "${ARR[@]}" because bash 3.2 (macOS) treats an empty array as unset
+    # under `set -u` and aborts. Harmless on bash 4.4+, required on 3.2.
     GRES_FLAG=()
     if [[ "${USE_LOCAL_SCRATCH:-false}" == "true" && -n "${GRIDCAT_LOCAL_TMP:-}" ]]; then
         GRES_FLAG=(--gres="tmp:${GRIDCAT_LOCAL_TMP}")
@@ -116,9 +119,9 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         --time="${GRIDCAT_TIME}" \
         --cpus-per-task="${GRIDCAT_CPUS}" \
         --mem="${GRIDCAT_MEM}" \
-        "${DEP_FLAG[@]}" \
-        "${MAIL_FLAG[@]}" \
-        "${GRES_FLAG[@]}" \
+        ${DEP_FLAG[@]+"${DEP_FLAG[@]}"} \
+        ${MAIL_FLAG[@]+"${MAIL_FLAG[@]}"} \
+        ${GRES_FLAG[@]+"${GRES_FLAG[@]}"} \
         "${ORIG_SCRIPT_DIR}/03_gridcat.sh"
 fi
 
