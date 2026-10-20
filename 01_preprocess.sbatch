@@ -181,7 +181,7 @@ fi
 # Pass the config file path so MATLAB reads all settings from it, and the stage
 # list so it knows which parts of the preprocessing to execute.
 matlab -nodisplay -nosplash -r "\
-    addpath('${PIPELINE_DIR}'); \
+    addpath(genpath('${PIPELINE_DIR}/matlab')); \
     try, \
         run_spm_preproc('${BIDS_ROOT}', '${SUB}', '${SES}', '${CONFIG_FILE}', '${STAGES}'); \
     catch ME, \

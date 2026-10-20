@@ -496,11 +496,11 @@ for k = 1:numel(uKeys)
     sessInfo(k).ses = ses;
 
     if strcmpi(ROI_MODE, 'bilat_only') || strcmpi(ROI_MODE, 'both')
-        sessInfo(k).roi.bilat = find_roi_from_index(roiNames, roiFolders, sub, ses, 'bilat', FAIL_ON_MISSING);
+        sessInfo(k).roi.bilat = find_roi_from_index(roiNames, roiFolders, sub, ses, 'bilat', ROI_LABEL, FAIL_ON_MISSING);
     end
     if strcmpi(ROI_MODE, 'lr_only') || strcmpi(ROI_MODE, 'both')
-        sessInfo(k).roi.left  = find_roi_from_index(roiNames, roiFolders, sub, ses, 'left', FAIL_ON_MISSING);
-        sessInfo(k).roi.right = find_roi_from_index(roiNames, roiFolders, sub, ses, 'right', FAIL_ON_MISSING);
+        sessInfo(k).roi.left  = find_roi_from_index(roiNames, roiFolders, sub, ses, 'left', ROI_LABEL, FAIL_ON_MISSING);
+        sessInfo(k).roi.right = find_roi_from_index(roiNames, roiFolders, sub, ses, 'right', ROI_LABEL, FAIL_ON_MISSING);
     end
 end
 
@@ -541,13 +541,17 @@ if useParallel
     gridDir_ = char(GRIDCAT_DIR);
     circDir_ = char(CIRCSTAT_DIR);
 
+    % Workers need the toolboxes AND this pipeline's own matlab/ tree,
+    % which is split across topic subfolders - hence genpath.
+    ownCode = genpath(fileparts(mfilename('fullpath')));
     cmd = sprintf([ ...
-        'addpath(''%s''); addpath(''%s''); addpath(''%s''); ' ...
+        'addpath(''%s''); addpath(''%s''); addpath(''%s''); addpath(''%s''); ' ...
         'spm(''defaults'',''fmri''); spm_jobman(''initcfg''); ' ...
         'spm_get_defaults(''cmdline'', true); '], ...
         strrep(spmDir_, '''', ''''''), ...
         strrep(gridDir_, '''', ''''''), ...
-        strrep(circDir_, '''', ''''''));
+        strrep(circDir_, '''', ''''''), ...
+        strrep(ownCode, '''', ''''''));
     pctRunOnAll(cmd);
 
     fprintf('Parallel pool ready (%d workers).\n\n', nWorkers);
@@ -568,7 +572,7 @@ if useParallel
         try
             thisRuns = runs(keyIdx == k);
             thisROI  = sessInfo(k).roi;
-            run_one_session(thisRuns, thisROI, OUTPUT_ROOT, ROI_MODE, ...
+            run_one_session(thisRuns, thisROI, OUTPUT_ROOT, ROI_MODE, ROI_LABEL, ...
                 GLM_TR, X_FOLD, MASKING_THR, MICRO_ONSET, MICRO_RES, ...
                 DERIVATIVES, DISP_DESIGN, HPF_DEFAULT, ...
                 eventUsage_GLM1, eventUsage_GLM2, keepUnusedGridEvents, ...
@@ -585,7 +589,7 @@ else
         try
             thisRuns = runs(keyIdx == k);
             thisROI  = sessInfo(k).roi;
-            run_one_session(thisRuns, thisROI, OUTPUT_ROOT, ROI_MODE, ...
+            run_one_session(thisRuns, thisROI, OUTPUT_ROOT, ROI_MODE, ROI_LABEL, ...
                 GLM_TR, X_FOLD, MASKING_THR, MICRO_ONSET, MICRO_RES, ...
                 DERIVATIVES, DISP_DESIGN, HPF_DEFAULT, ...
                 eventUsage_GLM1, eventUsage_GLM2, keepUnusedGridEvents, ...
@@ -665,7 +669,7 @@ end
 %%           HELPER FUNCTIONS (you should not need to edit these)
 %% =====================================================================
 
-function run_one_session(thisRuns, roi, OUTPUT_ROOT, ROI_MODE, ...
+function run_one_session(thisRuns, roi, OUTPUT_ROOT, ROI_MODE, ROI_LABEL, ...
     GLM_TR, X_FOLD, MASKING_THR, MICRO_ONSET, MICRO_RES, ...
     DERIVATIVES, DISP_DESIGN, HPF_DEFAULT, ...
     eventUsage_GLM1, eventUsage_GLM2, keepUnusedGridEvents, ...
@@ -707,7 +711,7 @@ function run_one_session(thisRuns, roi, OUTPUT_ROOT, ROI_MODE, ...
     estimateGLM(cfg);
 
     % --- Step 2: GLM2 for each ROI ---
-    roiList = build_roi_list(roi, ROI_MODE, sub, ses);
+    roiList = build_roi_list(roi, ROI_MODE, sub, ses, ROI_LABEL);
 
     for j = 1:numel(roiList)
         roiLabel = roiList{j}.label;
@@ -738,22 +742,23 @@ function run_one_session(thisRuns, roi, OUTPUT_ROOT, ROI_MODE, ...
 end
 
 
-function roiList = build_roi_list(roi, ROI_MODE, sub, ses)
+function roiList = build_roi_list(roi, ROI_MODE, sub, ses, roiLabel)
 % Builds a list of ROI masks to use for GLM2, based on ROI_MODE.
+% roiLabel names them, and ends up in the grid_metrics output filenames.
     roiList = {};
 
     if strcmpi(ROI_MODE, 'bilat_only') || strcmpi(ROI_MODE, 'both')
         if ~isempty(roi.bilat)
-            roiList{end+1} = struct('label', 'ErC-bilat', 'path', roi.bilat);
+            roiList{end+1} = struct('label', [roiLabel '-bilat'], 'path', roi.bilat);
         end
     end
 
     if strcmpi(ROI_MODE, 'lr_only') || strcmpi(ROI_MODE, 'both')
         if ~isempty(roi.left)
-            roiList{end+1} = struct('label', 'ErC-left', 'path', roi.left);
+            roiList{end+1} = struct('label', [roiLabel '-left'], 'path', roi.left);
         end
         if ~isempty(roi.right)
-            roiList{end+1} = struct('label', 'ErC-right', 'path', roi.right);
+            roiList{end+1} = struct('label', [roiLabel '-right'], 'path', roi.right);
         end
     end
 
@@ -763,25 +768,26 @@ function roiList = build_roi_list(roi, ROI_MODE, sub, ses)
 end
 
 
-function roiPath = find_roi_from_index(roiNames, roiFolders, sub, ses, side, failFast)
+function roiPath = find_roi_from_index(roiNames, roiFolders, sub, ses, side, roiLabel, failFast)
 % Finds a specific ROI mask from the pre-indexed ROI file list.
-% Filters for names containing the subject, session, 'ErC', and the side label.
+% Filters for names containing the subject, session, the anatomical label
+% (ROI_LABEL in config.sh) and the side. The label was hardcoded 'ErC',
+% which meant any other structure silently matched nothing.
     roiPath = '';
 
     if ~ismember(lower(side), {'bilat', 'left', 'right'})
         error('Unknown ROI side: %s (expected bilat, left, or right)', side);
     end
 
-    % Filter from pre-indexed list: must contain sub, ses, ErC, and side
-    hasSub  = contains(roiNames, sub);
-    hasSes  = contains(roiNames, ses);
-    isErC   = ~cellfun(@isempty, regexpi(roiNames, 'ErC'));
-    isSide  = ~cellfun(@isempty, regexpi(roiNames, lower(side)));
-    match   = hasSub & hasSes & isErC & isSide;
+    hasSub   = contains(roiNames, sub);
+    hasSes   = contains(roiNames, ses);
+    isLabel  = ~cellfun(@isempty, regexpi(roiNames, regexptranslate('escape', roiLabel)));
+    isSide   = ~cellfun(@isempty, regexpi(roiNames, lower(side)));
+    match    = hasSub & hasSes & isLabel & isSide;
 
     if ~any(match)
-        msg = sprintf('No %s ROI mask found for %s %s (filtered for ErC + %s)', ...
-            upper(side), sub, ses, side);
+        msg = sprintf('No %s ROI mask found for %s %s (filtered for %s + %s)', ...
+            upper(side), sub, ses, roiLabel, side);
         if failFast; error(msg); else; warning(msg); return; end
     end
 

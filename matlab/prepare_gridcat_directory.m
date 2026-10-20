@@ -18,6 +18,7 @@ function prepare_gridcat_directory(PREPROC_ROOT, OUTPUT_ROOT, varargin)
 %   'ExcludeTasks'  - Cell array of tasks to exclude (default: {'task-rest','task-reverse'})
 %   'FuncPrefix'    - Prefix for functional files (default: 'u')
 %   'ROIPrefix'     - Prefix for ROI files (default: 'r')
+%   'ROILabel'      - Anatomical label in the ROI filenames (default: 'ErC')
 %   'RPPrefix'      - Prefix for motion regressor files (default: 'rp')
 %   'CopyMode'      - 'copy' or 'symlink' (default: 'copy')
 %   'Reset'         - Empty the split/rp/ROI folders first (default: true).
@@ -58,6 +59,10 @@ addParameter(p, 'IncludeTasks', {}, @iscell);
 addParameter(p, 'ExcludeTasks', {'task-rest', 'task-reverse'}, @iscell);
 addParameter(p, 'FuncPrefix', 'u', @ischar);
 addParameter(p, 'ROIPrefix', 'r', @ischar);
+% The anatomical label in the ROI filenames (ROI_LABEL in config.sh). Used
+% to pick the masks apart from anything else in anat/; was hardcoded 'ErC',
+% which silently found nothing for any other structure.
+addParameter(p, 'ROILabel', 'ErC', @ischar);
 addParameter(p, 'RPPrefix', 'rp', @ischar);
 addParameter(p, 'CopyMode', 'copy', @(x) ismember(x, {'copy', 'symlink'}));
 addParameter(p, 'DryRun', false, @islogical);
@@ -212,10 +217,15 @@ if useParallel
     % Initialize SPM on all workers
     spmPath_ = char(cfg.SPMPath);
     if ~isempty(spmPath_)
+        % Workers need SPM and this pipeline's own matlab/ tree, which is
+        % split across topic subfolders - hence genpath.
+        ownCode = genpath(fileparts(mfilename('fullpath')));
         cmd = sprintf([ ...
-            'addpath(''%s''); spm(''defaults'',''fmri''); spm_jobman(''initcfg''); ' ...
+            'addpath(''%s''); addpath(''%s''); ' ...
+            'spm(''defaults'',''fmri''); spm_jobman(''initcfg''); ' ...
             'spm_get_defaults(''cmdline'', true);'], ...
-            strrep(spmPath_, '''', ''''''));
+            strrep(spmPath_, '''', ''''''), ...
+            strrep(ownCode, '''', ''''''));
         pctRunOnAll(cmd);
     end
     fprintf('Parallel pool ready.\n\n');
@@ -235,6 +245,7 @@ funcPrefix_ = cfg.FuncPrefix;
 funcSuffix_ = cfg.FuncSuffix;
 rpPrefix_   = cfg.RPPrefix;
 roiPrefix_  = cfg.ROIPrefix;
+roiLabel_   = cfg.ROILabel;
 copyMode_   = cfg.CopyMode;
 verbose_    = cfg.Verbose;
 dryRun_     = cfg.DryRun;
@@ -246,7 +257,7 @@ if useParallel
     parfor k = 1:totalSessions
         allResults{k} = process_one_session(sesItems(k), ...
             FUNC_DIR, RP_DIR, ROI_DIR, ...
-            funcPrefix_, funcSuffix_, rpPrefix_, roiPrefix_, ...
+            funcPrefix_, funcSuffix_, rpPrefix_, roiPrefix_, roiLabel_, ...
             copyMode_, verbose_, dryRun_);
     end
 else
@@ -254,7 +265,7 @@ else
         fprintf('\n[%d/%d] Processing %s / %s\n', k, totalSessions, sesItems(k).sub, sesItems(k).ses);
         allResults{k} = process_one_session(sesItems(k), ...
             FUNC_DIR, RP_DIR, ROI_DIR, ...
-            funcPrefix_, funcSuffix_, rpPrefix_, roiPrefix_, ...
+            funcPrefix_, funcSuffix_, rpPrefix_, roiPrefix_, roiLabel_, ...
             copyMode_, verbose_, dryRun_);
     end
 end
@@ -267,7 +278,7 @@ summary = [allResults{:}];
 % GridCAT analysis reads this to pair each task with the right event table,
 % and it is the only place where the run entity survives the flattening.
 if ~cfg.DryRun && ~isempty(summary)
-    write_run_manifest(MANIFEST_FILE, summary);
+    write_flatten_manifest(MANIFEST_FILE, summary);
     fprintf('Run manifest written to: %s\n', MANIFEST_FILE);
 end
 
@@ -301,7 +312,7 @@ end
 %% ======================== HELPER FUNCTIONS ========================
 
 function results = process_one_session(item, FUNC_DIR, RP_DIR, ROI_DIR, ...
-    funcPrefix, funcSuffix, rpPrefix, roiPrefix, copyMode, verbose, dryRun)
+    funcPrefix, funcSuffix, rpPrefix, roiPrefix, roiLabel, copyMode, verbose, dryRun)
 % PROCESS_ONE_SESSION  Flatten a single subject-session (parfor-safe).
 %
 % Returns a struct array with one entry per task (+ ROI info on last entry).
@@ -383,13 +394,13 @@ function results = process_one_session(item, FUNC_DIR, RP_DIR, ROI_DIR, ...
     roiAllFiles = dir(fullfile(anatDir, sprintf('%s*%s*%s*.nii', roiPrefix, sub, ses)));
     roiAllFiles = roiAllFiles(~startsWith({roiAllFiles.name}, '._'));
 
-    namesAll = {roiAllFiles.name};
-    isErC   = ~cellfun(@isempty, regexpi(namesAll, 'ErC'));
+    namesAll  = {roiAllFiles.name};
+    isLabel = ~cellfun(@isempty, regexpi(namesAll, regexptranslate('escape', roiLabel)));
     isLeft  = ~cellfun(@isempty, regexpi(namesAll, 'left'));
     isRight = ~cellfun(@isempty, regexpi(namesAll, 'right'));
 
-    roiLeftFiles  = roiAllFiles(isErC & isLeft);
-    roiRightFiles = roiAllFiles(isErC & isRight);
+    roiLeftFiles  = roiAllFiles(isLabel & isLeft);
+    roiRightFiles = roiAllFiles(isLabel & isRight);
 
     hasLeft  = ~isempty(roiLeftFiles);
     hasRight = ~isempty(roiRightFiles);
@@ -489,8 +500,8 @@ function p = strip_trailing_underscore(p)
 p = regexprep(p, '_+$', '');
 end
 
-function write_run_manifest(manifestFile, summary)
-% WRITE_RUN_MANIFEST  Which run of each task ended up in GLM_runauto.
+function write_flatten_manifest(manifestFile, summary)
+% WRITE_FLATTEN_MANIFEST  Which run of each task ended up in GLM_runauto.
 %
 % run_gridcat_analysis.m reads this to decide whether an event table named
 % ..._run-2_EventData.txt belongs to the data that was actually preprocessed.

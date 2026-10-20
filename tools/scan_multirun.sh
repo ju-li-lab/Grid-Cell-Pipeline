@@ -42,6 +42,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# config.sh and bids_common.sh live one level up, at the pipeline root.
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 CONFIG_FILE=""
 LIST=""
@@ -69,7 +71,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -z "$CONFIG_FILE" ]] && CONFIG_FILE="${SCRIPT_DIR}/config.sh"
+[[ -z "$CONFIG_FILE" ]] && CONFIG_FILE="${ROOT_DIR}/config.sh"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "ERROR: Config file not found: $CONFIG_FILE" >&2
@@ -79,7 +81,7 @@ fi
 # shellcheck disable=SC1090
 source "$CONFIG_FILE"
 # shellcheck disable=SC1091
-source "${SCRIPT_DIR}/bids_common.sh"
+source "${ROOT_DIR}/bids_common.sh"
 
 if [[ -z "${BIDS_ROOT:-}" ]] || [[ ! -d "$BIDS_ROOT" ]]; then
     echo "ERROR: BIDS_ROOT not set or does not exist: ${BIDS_ROOT:-<not set>}" >&2

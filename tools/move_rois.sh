@@ -59,7 +59,9 @@ NC='\033[0m'
 # Setup
 # ======================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/config.sh"
+# config.sh and bids_common.sh live one level up, at the pipeline root.
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+CONFIG_FILE="${ROOT_DIR}/config.sh"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo -e "${RED}ERROR: Config file not found: $CONFIG_FILE${NC}"
@@ -67,10 +69,10 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
 fi
 
 source "$CONFIG_FILE"
-source "${SCRIPT_DIR}/bids_common.sh"
+source "${ROOT_DIR}/bids_common.sh"
 
 # Check required config
-for var in BIDS_ROOT ROI_SOURCE_DIR ROI_SOURCE_LABEL ROI_PATTERN_LEFT ROI_PATTERN_RIGHT; do
+for var in BIDS_ROOT ROI_SOURCE_DIR ROI_LABEL ROI_PATTERN_LEFT ROI_PATTERN_RIGHT; do
     if [[ -z "${!var:-}" ]]; then
         echo -e "${RED}ERROR: $var not set in $CONFIG_FILE${NC}"
         exit 1
@@ -122,7 +124,7 @@ echo "========================================"
 echo "Source:       $ROI_SOURCE_DIR"
 echo "Target:       $ROI_DERIV"
 echo "BIDS (read):  $BIDS_ROOT"
-echo "ROI label:    $ROI_SOURCE_LABEL"
+echo "ROI label:    $ROI_LABEL"
 echo "Pattern L:    $ROI_PATTERN_LEFT"
 echo "Pattern R:    $ROI_PATTERN_RIGHT"
 echo "Decompress:   $( [[ $DECOMPRESS -eq 1 ]] && echo 'yes (.nii.gz → .nii)' || echo 'no' )"
@@ -264,18 +266,18 @@ while IFS= read -r -d '' f; do
     ((found_files++)) || true
     process_roi "$f"
 done < <(find "$ROI_SOURCE_DIR" -type f \( \
-    -name "sub-*_ses-*_*${ROI_SOURCE_LABEL}_left.nii" -o \
-    -name "sub-*_ses-*_*${ROI_SOURCE_LABEL}_left.nii.gz" -o \
-    -name "sub-*_ses-*_*${ROI_SOURCE_LABEL}_right.nii" -o \
-    -name "sub-*_ses-*_*${ROI_SOURCE_LABEL}_right.nii.gz" -o \
-    -name "sub-*_ses-*_*${ROI_SOURCE_LABEL}_lh.nii" -o \
-    -name "sub-*_ses-*_*${ROI_SOURCE_LABEL}_lh.nii.gz" -o \
-    -name "sub-*_ses-*_*${ROI_SOURCE_LABEL}_rh.nii" -o \
-    -name "sub-*_ses-*_*${ROI_SOURCE_LABEL}_rh.nii.gz" -o \
-    -name "sub-*_ses-*_*${ROI_SOURCE_LABEL}_L.nii" -o \
-    -name "sub-*_ses-*_*${ROI_SOURCE_LABEL}_L.nii.gz" -o \
-    -name "sub-*_ses-*_*${ROI_SOURCE_LABEL}_R.nii" -o \
-    -name "sub-*_ses-*_*${ROI_SOURCE_LABEL}_R.nii.gz" \
+    -name "sub-*_ses-*_*${ROI_LABEL}_left.nii" -o \
+    -name "sub-*_ses-*_*${ROI_LABEL}_left.nii.gz" -o \
+    -name "sub-*_ses-*_*${ROI_LABEL}_right.nii" -o \
+    -name "sub-*_ses-*_*${ROI_LABEL}_right.nii.gz" -o \
+    -name "sub-*_ses-*_*${ROI_LABEL}_lh.nii" -o \
+    -name "sub-*_ses-*_*${ROI_LABEL}_lh.nii.gz" -o \
+    -name "sub-*_ses-*_*${ROI_LABEL}_rh.nii" -o \
+    -name "sub-*_ses-*_*${ROI_LABEL}_rh.nii.gz" -o \
+    -name "sub-*_ses-*_*${ROI_LABEL}_L.nii" -o \
+    -name "sub-*_ses-*_*${ROI_LABEL}_L.nii.gz" -o \
+    -name "sub-*_ses-*_*${ROI_LABEL}_R.nii" -o \
+    -name "sub-*_ses-*_*${ROI_LABEL}_R.nii.gz" \
 \) -print0 2>/dev/null | sort -z)
 
 # ======================================================================
@@ -292,10 +294,10 @@ echo "  Errors:        $errors"
 echo ""
 
 if [[ $found_files -eq 0 ]]; then
-    echo -e "${RED}No ROI files found matching *${ROI_SOURCE_LABEL}_{left,right}.nii* in:${NC}"
+    echo -e "${RED}No ROI files found matching *${ROI_LABEL}_{left,right}.nii* in:${NC}"
     echo "  $ROI_SOURCE_DIR"
     echo ""
-    echo "Check ROI_SOURCE_DIR and ROI_SOURCE_LABEL in config.sh"
+    echo "Check ROI_SOURCE_DIR and ROI_LABEL in config.sh"
     exit 1
 fi
 

@@ -21,7 +21,6 @@
 #
 #    Reading BIDS filenames and sidecars
 #      bids_entity <filename> <entity>  e.g. bids_entity "$f" run  ->  2
-#      bids_suffix <filename>           e.g. _T2w.nii.gz          ->  T2w
 #      bids_strip_ext <filename>
 #      json_field <json> <field>
 #      acq_seconds <nifti>              acquisition time from the JSON sidecar
@@ -157,6 +156,14 @@ stages_reset_from_scratch() {
 }
 
 # Should the derivatives be wiped for this stage list? Honours DERIV_RESET.
+# Whether to clear the preprocessing derivatives before this run.
+#
+# NOTE: this rule also exists in MATLAB, in deriv_reset_wanted() inside
+# run_spm_preproc.m. Both are needed and neither is redundant: this one runs
+# once before an array is submitted (so sessions dropped from the subject
+# list do not survive), the MATLAB one runs per session at job start (so
+# calling 01_preprocess.sbatch directly still clears). Change one, change
+# the other.
 deriv_reset_wanted() {
     local stages="${1:-all}" mode="${2:-}"
     case "${DERIV_RESET:-auto}" in
@@ -232,12 +239,6 @@ bids_entity() {
     return 1
 }
 
-# The BIDS suffix: the last _-separated chunk of the stem (T2w, bold, epi, ...).
-bids_suffix() {
-    local stem
-    stem="$(bids_strip_ext "$1")"
-    printf '%s' "${stem##*_}"
-}
 
 # The run label as it appears in run_selection.tsv: "run-2", or "no-run".
 bids_run_label() {
@@ -310,25 +311,6 @@ PY
     return 1
 }
 
-# series_number <nifti> — SeriesNumber from the sidecar, or nothing.
-series_number() {
-    local nii="$1" js
-    js="$(json_sidecar "$nii")" || return 1
-    json_field "$js" SeriesNumber
-}
-
-# A short human-readable acquisition stamp for the scan report: "10:42:13 #7".
-acq_stamp() {
-    local nii="$1" secs sn out=""
-    if secs="$(acq_seconds "$nii")"; then
-        out="$(python3 -c "s=float('$secs'); print('%02d:%02d:%02d' % (s//3600, (s%3600)//60, s%60))" 2>/dev/null)"
-    fi
-    if sn="$(series_number "$nii")"; then
-        out="${out:+${out} }#${sn%.*}"
-    fi
-    [[ -z "$out" ]] && return 1
-    printf '%s' "$out"
-}
 
 # -----------------------------------------------------------------------------
 #  run_selection.tsv
@@ -383,43 +365,6 @@ run_selection_file() {
     fi
 }
 
-# -----------------------------------------------------------------------------
-#  Picking one file out of several runs
-# -----------------------------------------------------------------------------
-
-# pick_run <selected-run-label-or-empty> <file...>
-#   Prints the file to use.
-#     - one candidate                -> that one
-#     - a selection like "run-2"     -> the candidate carrying that run entity
-#     - "no-run"                     -> the candidate without a run entity
-#     - nothing selected             -> the highest run number (sorted last)
-#   Returns 1 when a selection was given but matches nothing, so the caller can
-#   decide whether that is fatal.
-pick_run() {
-    local sel="$1"; shift
-    local f label
-    [[ $# -eq 0 ]] && return 1
-
-    if [[ $# -eq 1 ]]; then
-        printf '%s' "$1"
-        return 0
-    fi
-
-    if [[ -n "$sel" ]]; then
-        for f in "$@"; do
-            label="$(bids_run_label "$f")"
-            if [[ "$label" == "$sel" || "$label" == "run-${sel#run-}" ]]; then
-                printf '%s' "$f"
-                return 0
-            fi
-        done
-        return 1
-    fi
-
-    # No selection: the last in sorted order, which is the highest run number.
-    printf '%s' "$(printf '%s\n' "$@" | sort | tail -1)"
-    return 0
-}
 
 # pick_nearest <anchor-seconds> <file...>
 #   Prints the file acquired closest to the anchor time, and its gap in seconds

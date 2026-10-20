@@ -191,7 +191,7 @@ module load "${MATLAB_MODULE}"
 MATLAB_CODE_DIR="${GRIDCAT_ORIG_SCRIPT_DIR:-$ORIG_SCRIPT_DIR}"
 
 matlab -nodisplay -nosplash -r "\
-    addpath('${MATLAB_CODE_DIR}'); \
+    addpath(genpath('${MATLAB_CODE_DIR}/matlab')); \
     try, \
         run_gridcat_analysis('${CONFIG_FILE}', ${SUBJECT_LIST_ARG}); \
     catch ME, \

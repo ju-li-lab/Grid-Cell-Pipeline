@@ -44,15 +44,17 @@
 #    --sub SUB        Restrict to one subject...
 #    --ses SES        ...and one session.
 #    --keep-uncompressed  Do not remove .nii files that have a .nii.gz twin.
-#    --config FILE    Config file (default: <script dir>/config.sh).
+#    --config FILE    Config file (default: <pipeline root>/config.sh).
 #    -h, --help       Show this help.
 # =============================================================================
 
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# config.sh and bids_common.sh live one level up, at the pipeline root.
+ROOT_DIR="$(cd "${SELF_DIR}/.." && pwd)"
 
-CONFIG_FILE="${SELF_DIR}/config.sh"
+CONFIG_FILE="${ROOT_DIR}/config.sh"
 SUB_ARG=""
 SES_ARG=""
 EXECUTE=false

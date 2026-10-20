@@ -101,7 +101,7 @@ else
 fi
 
 matlab -nodisplay -nosplash -r "\
-    addpath('${SCRIPT_DIR}'); \
+    addpath(genpath('${SCRIPT_DIR}/matlab')); \
     try, \
         excludeStr = '${EXCLUDE}'; \
         if ~isempty(excludeStr), \

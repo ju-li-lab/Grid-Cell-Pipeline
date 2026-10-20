@@ -46,8 +46,8 @@
 #  Options:
 #    --sub SUB          Process one subject...
 #    --ses SES          ...and this session (both required together).
-#    --list FILE        Subject-session list (default: <script dir>/subses_list.txt).
-#    --config FILE      Config file (default: <script dir>/config.sh).
+#    --list FILE        Subject-session list (default: <pipeline root>/subses_list.txt).
+#    --config FILE      Config file (default: <pipeline root>/config.sh).
 #    --magnitude-source structural|auto
 #                       structural = always build the magnitude from the T1w
 #                                    (default; keeps every session identical).
@@ -64,8 +64,10 @@
 set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# config.sh and bids_common.sh live one level up, at the pipeline root.
+ROOT_DIR="$(cd "${SELF_DIR}/.." && pwd)"
 
-CONFIG_FILE="${SELF_DIR}/config.sh"
+CONFIG_FILE="${ROOT_DIR}/config.sh"
 SUB_ARG=""
 SES_ARG=""
 LIST=""
@@ -111,7 +113,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
 fi
 source "$CONFIG_FILE"
 # shellcheck disable=SC1091
-source "${SELF_DIR}/bids_common.sh"
+source "${ROOT_DIR}/bids_common.sh"
 
 : "${BIDS_ROOT:?ERROR: BIDS_ROOT not set in config.sh}"
 
@@ -120,7 +122,7 @@ FMAP_DERIV="$(deriv_fieldmaps)" || {
     exit 1
 }
 
-[[ -z "$LIST" ]]       && LIST="${SCRIPT_DIR:-$SELF_DIR}/subses_list.txt"
+[[ -z "$LIST" ]]       && LIST="${PIPELINE_DIR:-$ROOT_DIR}/subses_list.txt"
 [[ -z "$MAG_SOURCE" ]] && MAG_SOURCE="${FIELDMAP_MAGNITUDE_SOURCE:-structural}"
 [[ -z "$DELTA_TE_ARG" ]] && DELTA_TE_ARG="${FIELDMAP_DELTA_TE:-}"
 
