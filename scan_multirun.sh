@@ -18,7 +18,7 @@
 #   bash scan_multirun.sh                      # scan everything in BIDS_ROOT
 #   bash scan_multirun.sh --list subses_list.txt
 #   bash scan_multirun.sh --fresh              # discard previous selections
-#   bash scan_multirun.sh path/to/pipeline_config.cfg
+#   bash scan_multirun.sh path/to/config.sh
 #
 # Options:
 #   --list FILE     Only scan the subject-sessions in this list.
@@ -69,7 +69,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-[[ -z "$CONFIG_FILE" ]] && CONFIG_FILE="${SCRIPT_DIR}/pipeline_config.cfg"
+[[ -z "$CONFIG_FILE" ]] && CONFIG_FILE="${SCRIPT_DIR}/config.sh"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "ERROR: Config file not found: $CONFIG_FILE" >&2

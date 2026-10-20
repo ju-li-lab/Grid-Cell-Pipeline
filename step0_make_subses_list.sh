@@ -4,7 +4,7 @@
 # =============================================================================
 #
 #  This script:
-#    1. Sources pipeline_config.cfg (auto-detects location)
+#    1. Sources config.sh (auto-detects location)
 #    2. Validates BIDS_ROOT exists
 #    3. Finds all sub-XX/ses-YY pairs with func/ directories
 #    4. Checks for .nii or .nii.gz functional files (raw names only — output
@@ -21,7 +21,7 @@ set -euo pipefail
 # ============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/pipeline_config.cfg"
+CONFIG_FILE="${SCRIPT_DIR}/config.sh"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "ERROR: Config file not found: $CONFIG_FILE"

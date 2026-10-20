@@ -44,7 +44,7 @@
 #    --sub SUB        Restrict to one subject...
 #    --ses SES        ...and one session.
 #    --keep-uncompressed  Do not remove .nii files that have a .nii.gz twin.
-#    --config FILE    Config file (default: <script dir>/pipeline_config.cfg).
+#    --config FILE    Config file (default: <script dir>/config.sh).
 #    -h, --help       Show this help.
 # =============================================================================
 
@@ -52,7 +52,7 @@ set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-CONFIG_FILE="${SELF_DIR}/pipeline_config.cfg"
+CONFIG_FILE="${SELF_DIR}/config.sh"
 SUB_ARG=""
 SES_ARG=""
 EXECUTE=false
@@ -86,7 +86,7 @@ fi
 # shellcheck disable=SC1090
 source "$CONFIG_FILE"
 
-: "${BIDS_ROOT:?ERROR: BIDS_ROOT not set in pipeline_config.cfg}"
+: "${BIDS_ROOT:?ERROR: BIDS_ROOT not set in config.sh}"
 
 if [[ ! -d "$BIDS_ROOT" ]]; then
     printf "${RED}ERROR: BIDS_ROOT not found: %s${NC}\n" "$BIDS_ROOT" >&2

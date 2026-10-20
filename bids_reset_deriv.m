@@ -63,7 +63,7 @@ end
 % Guard against DERIV_ROOT=/ or similar
 if numel(strsplit(strrep(sesDir, '\', '/'), '/')) < 4
     error('bids_reset_deriv:TooShallow', ...
-        'Refusing to clear a top-level path: %s\nCheck DERIV_ROOT in pipeline_config.cfg.', sesDir);
+        'Refusing to clear a top-level path: %s\nCheck DERIV_ROOT in config.sh.', sesDir);
 end
 end
 

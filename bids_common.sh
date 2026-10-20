@@ -6,7 +6,7 @@
 #
 #      source "${SCRIPT_DIR}/bids_common.sh"
 #
-#  It expects pipeline_config.cfg to have been sourced first, and provides:
+#  It expects config.sh to have been sourced first, and provides:
 #
 #    Derivative paths
 #      deriv_root                       <OUTPUT_ROOT>/derivatives, or DERIV_ROOT
@@ -52,7 +52,7 @@ deriv_root() {
     elif [[ -n "${OUTPUT_ROOT:-}" ]]; then
         printf '%s' "${OUTPUT_ROOT%/}/derivatives"
     else
-        echo "ERROR: neither DERIV_ROOT nor OUTPUT_ROOT is set in pipeline_config.cfg" >&2
+        echo "ERROR: neither DERIV_ROOT nor OUTPUT_ROOT is set in config.sh" >&2
         echo "       The pipeline has nowhere to write its derivatives." >&2
         return 1
     fi
@@ -68,6 +68,25 @@ deriv_dataset() {
 deriv_preproc()    { deriv_dataset "${DERIV_PREPROC:-spm-preproc}"; }
 deriv_rois()       { deriv_dataset "${DERIV_ROIS:-rois}"; }
 deriv_fieldmaps()  { deriv_dataset "${DERIV_FIELDMAPS:-fieldmaps}"; }
+
+# The prefix the preprocessed BOLD files actually carry, derived rather
+# than stored: SPM prepends RESLICE_PREFIX when it reslices, and
+# SMOOTH_PREFIX on top of that when smoothing runs. Keeping this as its
+# own config key meant it could disagree with what SPM had written, and
+# it did.
+#   SMOOTH_FWHM=0  -> u
+#   SMOOTH_FWHM>0  -> su
+func_prefix() {
+    local reslice="${RESLICE_PREFIX:-u}" smooth="${SMOOTH_PREFIX:-s}"
+    local fwhm="${SMOOTH_FWHM:-0}"
+    # Non-zero and non-empty means smoothing ran. Compared as a string so
+    # a decimal like 2.5 works without needing bc.
+    if [[ -n "$fwhm" && "$fwhm" != "0" && "$fwhm" != "0.0" ]]; then
+        printf '%s%s' "$smooth" "$reslice"
+    else
+        printf '%s' "$reslice"
+    fi
+}
 
 # deriv_session <dataset-dir> <sub> <ses> [modality]
 #   -> <dataset-dir>/sub-XX/ses-YY[/anat|func|fmap]

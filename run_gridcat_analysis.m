@@ -2,20 +2,20 @@ function run_gridcat_analysis(cfgFile, subjectListFile)
 % RUN_GRIDCAT_ANALYSIS  Run the GridCAT analysis (GLM1 + GLM2) for all subjects and sessions.
 %
 % Usage:
-%   run_gridcat_analysis()                              % Auto-detects pipeline_config.cfg
-%   run_gridcat_analysis('pipeline_config.cfg')        % Current directory
-%   run_gridcat_analysis('/full/path/pipeline_config.cfg')  % Explicit path
+%   run_gridcat_analysis()                              % Auto-detects config.sh
+%   run_gridcat_analysis('config.sh')        % Current directory
+%   run_gridcat_analysis('/full/path/config.sh')  % Explicit path
 %   run_gridcat_analysis(cfgFile, 'subses_list.txt')   % Only process subjects in list
 %
 % This function:
-%   1. Reads all settings from pipeline_config.cfg (or auto-detects it).
+%   1. Reads all settings from config.sh (or auto-detects it).
 %   2. Finds all EventData files, functional scans, motion regressors, and ROI masks.
 %   3. Optionally filters to only process subject-sessions in subjectListFile.
 %   4. Runs GLM1 (first-level GLM) for each subject-session.
 %   5. Runs GLM2 (grid orientation analysis) using the ROI masks you specify.
 %   6. Exports grid metrics (the main output you care about).
 %
-% Before running, configure the settings in pipeline_config.cfg.
+% Before running, configure the settings in config.sh.
 % Everything else should work without changes.
 %
 % HOW TO RUN (on the HPC via SLURM):
@@ -28,11 +28,11 @@ function run_gridcat_analysis(cfgFile, subjectListFile)
 %%                      READ CONFIGURATION
 %% =====================================================================
 
-% If no config file is provided, auto-detect it in the same directory as this script
+% Settings come from two files, each read by the language that uses it:
+%   config.sh       paths, prefixes and modes, as plain strings
+%   spm_options.m   the GLM parameters, as MATLAB values
 if nargin < 1 || isempty(cfgFile)
-    scriptPath = mfilename('fullpath');
-    scriptDir = fileparts(scriptPath);
-    cfgFile = fullfile(scriptDir, 'pipeline_config.cfg');
+    cfgFile = fullfile(fileparts(mfilename('fullpath')), 'config.sh');
 end
 
 % SubjectList filter: if provided, only process these subject-session pairs
@@ -40,25 +40,22 @@ if nargin < 2
     subjectListFile = '';
 end
 
-% Read the configuration from file
-cfg = read_pipeline_config(cfgFile);
+% spm_options.m is the sibling of config.sh: the two together ARE the
+% settings. Putting that directory first on the path means a snapshotted
+% run reads the snapshot's settings, not whatever the live checkout has.
+addpath(fileparts(cfgFile), '-begin');
 
-% Map config keys to local variables with defaults
+cfg = read_config(cfgFile);
+OPT = spm_options();
+
 % ---- Directories ----
 NFS_OUTPUT_ROOT = cfg.OUTPUT_ROOT;
 ROOT_DIR = fullfile(NFS_OUTPUT_ROOT, 'GLM_runauto');
 
 % ---- Variant-aware output folder ----
-% RUN_VARIANT in the config lets several GridCAT analyses coexist under
-% the same OUTPUT_ROOT: empty -> GLM_output (default), else GLM_output_<variant>.
-RUN_VARIANT_RAW = '';
-if isfield(cfg, 'RUN_VARIANT') && ~isempty(cfg.RUN_VARIANT)
-    if ischar(cfg.RUN_VARIANT) || isstring(cfg.RUN_VARIANT)
-        RUN_VARIANT_RAW = char(cfg.RUN_VARIANT);
-    else
-        RUN_VARIANT_RAW = num2str(cfg.RUN_VARIANT);
-    end
-end
+% RUN_VARIANT lets several GridCAT analyses coexist under one OUTPUT_ROOT:
+% empty -> GLM_output, otherwise GLM_output_<variant>.
+RUN_VARIANT_RAW = cfg_or(cfg, 'RUN_VARIANT', '');
 SAFE_VARIANT = regexprep(RUN_VARIANT_RAW, '[^A-Za-z0-9._-]+', '_');
 SAFE_VARIANT = regexprep(SAFE_VARIANT, '^_+|_+$', '');
 if isempty(SAFE_VARIANT)
@@ -69,65 +66,57 @@ end
 OUTPUT_ROOT = fullfile(NFS_OUTPUT_ROOT, OUTPUT_FOLDER);
 
 % ---- Local scratch staging (bypass NFS I/O bottleneck) ----
-USE_LOCAL_SCRATCH = isfield(cfg, 'USE_LOCAL_SCRATCH') && strcmp(cfg.USE_LOCAL_SCRATCH, 'true');
-LOCAL_SCRATCH_BASE = '';
-if isfield(cfg, 'LOCAL_SCRATCH_BASE') && ~isempty(cfg.LOCAL_SCRATCH_BASE)
-    LOCAL_SCRATCH_BASE = cfg.LOCAL_SCRATCH_BASE;
-end
+USE_LOCAL_SCRATCH  = strcmp(cfg_or(cfg, 'USE_LOCAL_SCRATCH', 'false'), 'true');
+LOCAL_SCRATCH_BASE = cfg_or(cfg, 'LOCAL_SCRATCH_BASE', '');
 
-SPM_DIR = cfg.SPM_DIR;
+SPM_DIR     = cfg.SPM_DIR;
 GRIDCAT_DIR = cfg.GRIDCAT_DIR;
-
-% CircStat directory: use from config, or default to fullfile(GRIDCAT_DIR, 'CircStat2012a')
-if isfield(cfg, 'CIRCSTAT_DIR') && ~isempty(cfg.CIRCSTAT_DIR)
-    CIRCSTAT_DIR = cfg.CIRCSTAT_DIR;
-else
-    CIRCSTAT_DIR = fullfile(GRIDCAT_DIR, 'CircStat2012a');
-end
+CIRCSTAT_DIR = cfg_or(cfg, 'CIRCSTAT_DIR', fullfile(GRIDCAT_DIR, 'CircStat2012a'));
 
 % ---- File prefixes ----
-FUNC_PREFIX = cfg.FUNC_PREFIX;
-if isempty(FUNC_PREFIX)
-    FUNC_PREFIX = 'u';
+% FUNC_PREFIX is derived, not stored: SPM prepends RESLICE_PREFIX when it
+% reslices and SMOOTH_PREFIX on top when smoothing runs. The shell side
+% derives it the same way, in func_prefix() in bids_common.sh.
+RESLICE_PREFIX = cfg_or(cfg, 'RESLICE_PREFIX', 'u');
+SMOOTH_PREFIX  = cfg_or(cfg, 'SMOOTH_PREFIX',  's');
+if str2double(cfg_or(cfg, 'SMOOTH_FWHM', '0')) > 0
+    FUNC_PREFIX = [SMOOTH_PREFIX RESLICE_PREFIX];
+else
+    FUNC_PREFIX = RESLICE_PREFIX;
 end
 
-ERC_PREFIX = cfg.ROI_PREFIX;
-if isempty(ERC_PREFIX)
-    ERC_PREFIX = 'r';
-end
+ERC_PREFIX = cfg_or(cfg, 'ROI_PREFIX', 'r');
 
-% ---- ROI mode ----
-ROI_MODE = cfg.ROI_MODE;
-if isempty(ROI_MODE)
-    ROI_MODE = 'both';
-end
+% ---- ROIs ----
+ROI_MODE  = cfg_or(cfg, 'ROI_MODE',  'both');
+ROI_LABEL = cfg_or(cfg, 'ROI_LABEL', 'ErC');
 
 % ---- Task filtering ----
 INCLUDE_TASKS = {};  % Currently unused from config, can be extended
 
-% ---- fMRI / GLM model settings ----
-GLM_TR = cfg.TR;
-X_FOLD = cfg.X_FOLD_SYMMETRY;
-MASKING_THR = cfg.MASKING_THRESHOLD;
-MICRO_ONSET = cfg.MICROTIME_ONSET;
-MICRO_RES = cfg.MICROTIME_RESOLUTION;
-DERIVATIVES = cfg.DERIVATIVES;  % Expected as [0 0] from config
-DISP_DESIGN = cfg.DISPLAY_DESIGN;
-HPF_DEFAULT = cfg.HPF_CUTOFF;
+% ---- fMRI / GLM model settings (spm_options.m) ----
+GLM_TR      = OPT.TR;
+X_FOLD      = OPT.GLM.xFoldSymmetry;
+MASKING_THR = OPT.GLM.maskingThreshold;
+MICRO_ONSET = OPT.GLM.microtimeOnset;
+MICRO_RES   = OPT.GLM.microtimeResolution;
+DERIVATIVES = OPT.GLM.derivatives;
+DISP_DESIGN = OPT.GLM.dispDesignMatrix;
+HPF_DEFAULT = OPT.GLM.HPF_cutoff;
 
 % ---- GridCAT-specific settings ----
-eventUsage_GLM1 = cfg.EVENT_USAGE_GLM1;
-eventUsage_GLM2 = cfg.EVENT_USAGE_GLM2;
-keepUnusedGridEvents = cfg.KEEP_UNUSED_GRID_EVENTS;
-useVoxelWeighting = cfg.USE_VOXEL_WEIGHTING;
-avgOriAcrossRuns_flag = cfg.AVG_ORI_ACROSS_RUNS;
-GLM2_gridRegressorMethod = cfg.GLM2_REGRESSOR_METHOD;
+eventUsage_GLM1          = OPT.GLM.eventUsageSpecifier_GLM1;
+eventUsage_GLM2          = OPT.GLM.eventUsageSpecifier_GLM2;
+keepUnusedGridEvents     = OPT.GLM.keepUnusedGridEvents;
+useVoxelWeighting        = OPT.GLM.useVoxelWeighting;
+avgOriAcrossRuns_flag    = OPT.GLM.avgOriAcrossRuns;
+GLM2_gridRegressorMethod = OPT.GLM.gridRegressorMethod;
 
 % ---- Parallel processing ----
-MAX_WORKERS = cfg.MAX_WORKERS;
+MAX_WORKERS = str2double(cfg_or(cfg, 'MAX_WORKERS', '1'));
 
-% ---- Error handling (convert string to boolean) ----
-FAIL_ON_MISSING = strcmp(cfg.FAIL_ON_MISSING, 'true');
+% ---- Error handling ----
+FAIL_ON_MISSING = strcmp(cfg_or(cfg, 'FAIL_ON_MISSING', 'false'), 'true');
 
 
 %% =====================================================================

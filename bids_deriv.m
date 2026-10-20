@@ -3,7 +3,7 @@ function D = bids_deriv(cfgRaw, SUB, SES)
 %
 %   D = bids_deriv(cfgRaw, 'sub-01s13', 'ses-01')
 %
-%   cfgRaw is the struct from read_pipeline_config. Returns:
+%   cfgRaw is the struct from read_config. Returns:
 %
 %     D.root        the derivatives root      <OUTPUT_ROOT>/derivatives
 %     D.preproc     the preprocessing dataset <root>/spm-preproc
@@ -46,7 +46,7 @@ elseif isfield(cfgRaw, 'OUTPUT_ROOT') && ~isempty(cfgRaw.OUTPUT_ROOT)
 else
     error('bids_deriv:NoRoot', ...
         ['Cannot work out where the derivatives go.\n' ...
-         'Set DERIV_ROOT, or OUTPUT_ROOT, in pipeline_config.cfg.']);
+         'Set DERIV_ROOT, or OUTPUT_ROOT, in config.sh.']);
 end
 
 D.preproc   = fullfile(D.root, cfg_str(cfgRaw, 'DERIV_PREPROC',   'spm-preproc'));

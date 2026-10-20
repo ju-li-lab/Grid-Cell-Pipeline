@@ -4,7 +4,7 @@
 # =============================================================================
 #
 #  Reads the full subses_list.txt (from step0) and applies subject/session
-#  filters defined in pipeline_config.cfg. The original list is backed up
+#  filters defined in config.sh. The original list is backed up
 #  as subses_list_full.txt; the filtered result overwrites subses_list.txt.
 #
 #  Filters (all optional, leave empty to skip):
@@ -28,7 +28,7 @@ set -euo pipefail
 # ============================================================================
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/pipeline_config.cfg"
+CONFIG_FILE="${SCRIPT_DIR}/config.sh"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "ERROR: Config file not found: $CONFIG_FILE"
@@ -208,7 +208,7 @@ echo ""
 
 if [[ $TOTAL_AFTER -eq 0 ]]; then
     echo "WARNING: All subject-session pairs were filtered out!"
-    echo "  Check your INCLUDE/EXCLUDE settings in pipeline_config.cfg."
+    echo "  Check your INCLUDE/EXCLUDE settings in config.sh."
     echo "  Full list preserved in: $FULL_LIST"
     exit 1
 fi

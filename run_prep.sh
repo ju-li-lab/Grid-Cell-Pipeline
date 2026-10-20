@@ -12,7 +12,7 @@
 #  the event tables line up. Which run each file came from is recorded in
 #  GLM_runauto/run_manifest.tsv.
 #
-#  All settings are read from pipeline_config.cfg — no editing needed here.
+#  All settings are read from config.sh — no editing needed here.
 #
 #  Usage:
 #    sbatch run_prep.sh
@@ -32,7 +32,7 @@ set -euo pipefail
 # PIPELINE_SCRIPT_DIR is passed via --export when submitted from run_pipeline.sh.
 # Falls back to auto-detect for manual runs (won't work inside SLURM spool).
 SCRIPT_DIR="${PIPELINE_SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
-CONFIG_FILE="${SCRIPT_DIR}/pipeline_config.cfg"
+CONFIG_FILE="${SCRIPT_DIR}/config.sh"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "ERROR: Config file not found: $CONFIG_FILE"
@@ -43,9 +43,9 @@ source "$CONFIG_FILE"
 source "${SCRIPT_DIR}/bids_common.sh"
 
 # ---- Validate required config variables ----
-: "${BIDS_ROOT:?ERROR: BIDS_ROOT not set in pipeline_config.cfg}"
-: "${OUTPUT_ROOT:?ERROR: OUTPUT_ROOT not set in pipeline_config.cfg}"
-: "${SPM_DIR:?ERROR: SPM_DIR not set in pipeline_config.cfg}"
+: "${BIDS_ROOT:?ERROR: BIDS_ROOT not set in config.sh}"
+: "${OUTPUT_ROOT:?ERROR: OUTPUT_ROOT not set in config.sh}"
+: "${SPM_DIR:?ERROR: SPM_DIR not set in config.sh}"
 : "${MATLAB_MODULE:=matlab}"
 
 PREPROC_ROOT="$(deriv_preproc)"
@@ -80,6 +80,12 @@ else
     echo "  Func suffix: _bold (standard mode)"
 fi
 
+# ---- Prefix the preprocessed BOLD files carry ----
+# Derived from RESLICE_PREFIX/SMOOTH_PREFIX/SMOOTH_FWHM by func_prefix() in
+# bids_common.sh, so it cannot disagree with what SPM actually wrote.
+FUNC_PREFIX="$(func_prefix)"
+echo "  Func prefix: ${FUNC_PREFIX}"
+
 # ---- Build exclude tasks list for MATLAB ----
 # Convert comma-separated EXCLUDE_TASKS to MATLAB cell array
 EXCLUDE="${EXCLUDE_TASKS:-}"
@@ -108,9 +114,10 @@ matlab -nodisplay -nosplash -r "\
             '${PREPROC_ROOT}', \
             '${OUTPUT_ROOT}', \
             'ExcludeTasks', excludeTasks, \
-            'FuncPrefix', '${FUNC_PREFIX:-u}', \
+            'FuncPrefix', '${FUNC_PREFIX}', \
             'FuncSuffix', '${FUNC_SUFFIX}', \
             'ROIPrefix', '${ROI_PREFIX:-r}', \
+            'ROILabel', '${ROI_LABEL:-ErC}', \
             'CopyMode', '${COPY_MODE:-copy}', \
             'SPMPath', '${SPM_DIR}', \
             'MaxWorkers', ${PREP_CPUS:-5}, \

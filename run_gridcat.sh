@@ -8,13 +8,13 @@
 #                                                 submitter, which then submits
 #                                                 the real analysis job.
 #
-#  On submission this script takes a timestamped snapshot of pipeline_config.cfg
+#  On submission this script takes a timestamped snapshot of config.sh
 #  and subses_list.txt into runs/gridcat_<variant>_<timestamp>/ and tells SLURM
 #  to read from that snapshot. After submission you can freely edit
-#  pipeline_config.cfg (e.g. set a new RUN_VARIANT and resubmit) without
+#  config.sh (e.g. set a new RUN_VARIANT and resubmit) without
 #  disturbing the job that is already queued or running.
 #
-#  All settings are read from pipeline_config.cfg — no editing needed here.
+#  All settings are read from config.sh — no editing needed here.
 # =============================================================================
 
 # --- SLURM settings (used when this script runs AS the job) ---
@@ -31,7 +31,7 @@ ORIG_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #  SUBMITTER MODE — not yet inside a SLURM job
 # =============================================================================
 if [[ -z "${SLURM_JOB_ID:-}" ]]; then
-    CONFIG_FILE="${ORIG_SCRIPT_DIR}/pipeline_config.cfg"
+    CONFIG_FILE="${ORIG_SCRIPT_DIR}/config.sh"
     if [[ ! -f "$CONFIG_FILE" ]]; then
         echo "ERROR: Config file not found: $CONFIG_FILE" >&2
         exit 1
@@ -40,7 +40,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
 
-    : "${OUTPUT_ROOT:?ERROR: OUTPUT_ROOT not set in pipeline_config.cfg}"
+    : "${OUTPUT_ROOT:?ERROR: OUTPUT_ROOT not set in config.sh}"
     : "${SLURM_PARTITION:=compute}"
     : "${GRIDCAT_TIME:=01:00:00}"
     : "${GRIDCAT_CPUS:=30}"
@@ -60,7 +60,10 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
 
     mkdir -p "${SNAP_DIR}" "${ORIG_SCRIPT_DIR}/logs"
 
-    cp "$CONFIG_FILE" "${SNAP_DIR}/pipeline_config.cfg"
+    cp "$CONFIG_FILE" "${SNAP_DIR}/config.sh"
+    # The GLM parameters live in spm_options.m, so the snapshot is only a
+    # real snapshot if that travels with it.
+    cp "${ORIG_SCRIPT_DIR}/spm_options.m" "${SNAP_DIR}/spm_options.m"
     if [[ -f "${ORIG_SCRIPT_DIR}/subses_list.txt" ]]; then
         cp "${ORIG_SCRIPT_DIR}/subses_list.txt" "${SNAP_DIR}/subses_list.txt"
     fi
@@ -125,7 +128,7 @@ fi
 
 # Resolve the snapshot directory that the submitter created.
 SCRIPT_DIR="${PIPELINE_SCRIPT_DIR:-$ORIG_SCRIPT_DIR}"
-CONFIG_FILE="${SCRIPT_DIR}/pipeline_config.cfg"
+CONFIG_FILE="${SCRIPT_DIR}/config.sh"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "ERROR: Config file not found: $CONFIG_FILE"
@@ -145,9 +148,9 @@ mkdir -p "${LOG_DIR}"
 source "$CONFIG_FILE"
 
 # ---- Validate required config variables ----
-: "${SPM_DIR:?ERROR: SPM_DIR not set in pipeline_config.cfg}"
-: "${GRIDCAT_DIR:?ERROR: GRIDCAT_DIR not set in pipeline_config.cfg}"
-: "${OUTPUT_ROOT:?ERROR: OUTPUT_ROOT not set in pipeline_config.cfg}"
+: "${SPM_DIR:?ERROR: SPM_DIR not set in config.sh}"
+: "${GRIDCAT_DIR:?ERROR: GRIDCAT_DIR not set in config.sh}"
+: "${OUTPUT_ROOT:?ERROR: OUTPUT_ROOT not set in config.sh}"
 : "${MATLAB_MODULE:=matlab}"
 
 # ---- Determine output suffix from RUN_VARIANT ----

@@ -3,7 +3,7 @@ function run_spm_preproc(BIDS_ROOT, SUB, SES, cfgFile, stages)
 %
 % Example:
 %   run_spm_preproc('/sc-projects/.../b2_bids','sub-01s06','ses-01')
-%   run_spm_preproc('/sc-projects/.../b2_bids','sub-01s06','ses-01', '/path/to/pipeline_config.cfg')
+%   run_spm_preproc('/sc-projects/.../b2_bids','sub-01s06','ses-01', '/path/to/config.sh')
 %   run_spm_preproc('/sc-projects/.../b2_bids','sub-01s06','ses-01', '', 'realign,coreg,smooth')
 %
 % For one subject/session:
@@ -35,7 +35,7 @@ function run_spm_preproc(BIDS_ROOT, SUB, SES, cfgFile, stages)
 % A full run (a stage list that starts the preprocessing from its beginning)
 % clears the session's derivatives first, so the result is never a mixture of
 % this run and the last one. Partial runs keep them — that is what they resume
-% from. See DERIV_RESET in pipeline_config.cfg.
+% from. See DERIV_RESET in config.sh.
 %
 % MULTIPLE RUNS OF THE SAME SCAN
 % ------------------------------
@@ -56,7 +56,7 @@ function run_spm_preproc(BIDS_ROOT, SUB, SES, cfgFile, stages)
 % The chosen runs are recorded in <ses>/preproc_run_selection.tsv, which the
 % GridCAT preparation reads so the event files line up with the right run.
 %
-% STAGES (5th argument, or PREPROC_STAGES in pipeline_config.cfg)
+% STAGES (5th argument, or PREPROC_STAGES in config.sh)
 % ---------------------------------------------------------------
 % The work above is split into five stages that can be run independently. Every
 % stage reads what it needs from disk, so you can stop after any stage, inspect
@@ -89,197 +89,84 @@ function run_spm_preproc(BIDS_ROOT, SUB, SES, cfgFile, stages)
 % 'vdm,realign,coreg,smooth'. Alternatively drop ready-made voxel displacement
 % maps in as <func>/vdm_task-<N>.nii and run 'realign,coreg,smooth'.
 %
-% All settings come from pipeline_config.cfg via read_pipeline_config.m
+% Settings come from config.sh (paths, modes) and spm_options.m (SPM parameters).
 
 % --------- Handle optional arguments ----------
 if nargin < 4, cfgFile = ''; end
 if nargin < 5, stages  = ''; end
 
 if isempty(cfgFile)
-    % Auto-detect pipeline_config.cfg in same directory as this script
+    % Default to config.sh next to this script
     scriptDir = fileparts(mfilename('fullpath'));
-    cfgFile = fullfile(scriptDir, 'pipeline_config.cfg');
+    cfgFile = fullfile(scriptDir, 'config.sh');
 end
 
-assert(isfile(cfgFile), 'pipeline_config.cfg not found at: %s\nProvide cfgFile as 4th argument to run_spm_preproc.', cfgFile);
+assert(isfile(cfgFile), 'config.sh not found at: %s\nProvide cfgFile as 4th argument to run_spm_preproc.', cfgFile);
+
+% spm_options.m is the sibling of config.sh: the two together ARE the
+% settings. Putting that directory first on the path means a snapshotted
+% run reads the snapshot's settings, not whatever the live checkout has.
+addpath(fileparts(cfgFile), '-begin');
 
 % --------- Read configuration ----------
-cfgRaw = read_pipeline_config(cfgFile);
+% Two files, each read by the language that uses it:
+%   config.sh       paths, modes and filename patterns, as plain strings
+%   spm_options.m   everything that goes into an SPM batch, as MATLAB values
+%
+% There is no mapping table. Anything SPM accepts can be added to
+% spm_options.m and it reaches the batch without a line of code here.
+cfgRaw = read_config(cfgFile);
+OPT    = spm_options();
 
-% --------- Map config keys to CFG struct ----------
-CFG = struct();
+CFG     = struct();
+CFG.spm = OPT;          % the batch builders hand these to SPM wholesale
 
-% Paths
-CFG.SPM_DIR = cfgRaw.SPM_DIR;
+% ---- from config.sh ----
+CFG.SPM_DIR           = cfgRaw.SPM_DIR;
+CFG.PREPROC_MODE      = cfgRaw.PREPROC_MODE;
+CFG.TASK_LABELS       = strtrim(strsplit(cfgRaw.TASKS, ','));
+CFG.DO_COREG_ROIS     = str2double(cfg_or(cfgRaw, 'DO_COREG_ROIS', '1'));
+CFG.ROI_PATTERN_LEFT  = cfgRaw.ROI_PATTERN_LEFT;
+CFG.ROI_PATTERN_RIGHT = cfgRaw.ROI_PATTERN_RIGHT;
 
-% Acquisition parameters (note: config stores in MS, some script vars may differ)
-CFG.TR = cfgRaw.TR;                            % seconds
-CFG.TOTAL_READOUT = cfgRaw.TOTAL_READOUT_MS;  % milliseconds
-CFG.BLIPDIR = cfgRaw.BLIP_DIRECTION;
-CFG.EPI_BASED_FIELDMAP = cfgRaw.EPI_BASED_FIELDMAP;
-CFG.TE_SHORT = cfgRaw.TE_SHORT_MS;             % milliseconds
-CFG.TE_LONG = cfgRaw.TE_LONG_MS;               % milliseconds
-CFG.MASKBRAIN = cfgRaw.VDM_MASKBRAIN;
-
-% Tasks — can be numeric array [1 2 3] or string 'run1,run2'
-% Normalise to cell array of strings: {'run1','run2'} or {'1','2','3'}
-if isnumeric(cfgRaw.TASKS)
-    CFG.TASK_LABELS = arrayfun(@num2str, cfgRaw.TASKS, 'UniformOutput', false);
-else
-    CFG.TASK_LABELS = strtrim(strsplit(cfgRaw.TASKS, ','));
-end
-
-% Run selection file (for multi-run T2w/BOLD/fieldmap/reverse-PE)
-if isfield(cfgRaw, 'RUN_SELECTION_FILE') && ~isempty(cfgRaw.RUN_SELECTION_FILE)
-    CFG.RUN_SELECTION_FILE = cfgRaw.RUN_SELECTION_FILE;
-else
-    CFG.RUN_SELECTION_FILE = '';
-end
-
-% How far apart two scans may be acquired and still count as the same visit to
-% the scanner. Runs further apart than this are treated as different blocks,
-% which is what happens when the subject gets out and comes back.
-if isfield(cfgRaw, 'RUN_MATCH_GAP_MIN') && ~isempty(cfgRaw.RUN_MATCH_GAP_MIN)
-    CFG.RUN_MATCH_GAP_SEC = double(cfgRaw.RUN_MATCH_GAP_MIN) * 60;
-else
-    CFG.RUN_MATCH_GAP_SEC = 20 * 60;
-end
-
-% Stop rather than guess when several runs exist and nothing decides between
-% them. Silently pairing the wrong T2w with a task is worse than not running.
+% Which run to take when a session holds several of the same scan.
+CFG.RUN_SELECTION_FILE  = cfg_or(cfgRaw, 'RUN_SELECTION_FILE', '');
+CFG.RUN_MATCH_GAP_SEC   = str2double(cfg_or(cfgRaw, 'RUN_MATCH_GAP_MIN', '20')) * 60;
 CFG.STRICT_RUN_MATCHING = cfg_flag(cfgRaw, 'STRICT_RUN_MATCHING', true);
 
 % Clearing the derivatives before a full run: auto | always | never
-if isfield(cfgRaw, 'DERIV_RESET') && ~isempty(cfgRaw.DERIV_RESET)
-    CFG.DERIV_RESET = lower(strtrim(char(cfgRaw.DERIV_RESET)));
-else
-    CFG.DERIV_RESET = 'auto';
-end
+CFG.DERIV_RESET = lower(cfg_or(cfgRaw, 'DERIV_RESET', 'auto'));
 
-% ROI patterns
-CFG.ROI_PATTERN_LEFT = cfgRaw.ROI_PATTERN_LEFT;
-CFG.ROI_PATTERN_RIGHT = cfgRaw.ROI_PATTERN_RIGHT;
-CFG.DO_COREG_ROIS = cfgRaw.DO_COREG_ROIS;
-
-% Preprocessing mode
-CFG.PREPROC_MODE = cfgRaw.PREPROC_MODE;  % 'realign_unwarp', 'topup', or 'realign_only'
-
-% FSL topup parameters (only used when PREPROC_MODE=topup)
-if strcmp(CFG.PREPROC_MODE, 'topup')
-    CFG.TOPUP_PE_DIR_BOLD = cfgRaw.TOPUP_PE_DIR_BOLD;
-    CFG.TOPUP_PE_DIR_REVERSE = cfgRaw.TOPUP_PE_DIR_REVERSE;
-    CFG.TOPUP_READOUT_SEC = cfgRaw.TOPUP_READOUT_SEC;
-    CFG.TOPUP_REVERSE_PE_PATTERN = cfgRaw.TOPUP_REVERSE_PE_PATTERN;
-    if isfield(cfgRaw, 'TOPUP_REVERSE_PE_DIR') && ~isempty(cfgRaw.TOPUP_REVERSE_PE_DIR)
-        CFG.TOPUP_REVERSE_PE_DIR = cfgRaw.TOPUP_REVERSE_PE_DIR;
-    else
-        CFG.TOPUP_REVERSE_PE_DIR = 'auto';
-    end
-    if isfield(cfgRaw, 'TOPUP_CONFIG') && ~isempty(cfgRaw.TOPUP_CONFIG)
-        CFG.TOPUP_CONFIG = cfgRaw.TOPUP_CONFIG;
-    else
-        CFG.TOPUP_CONFIG = '';
-    end
-    CFG.TOPUP_APPLY_METHOD = cfgRaw.TOPUP_APPLY_METHOD;
-    if isfield(cfgRaw, 'TOPUP_INTERP') && ~isempty(cfgRaw.TOPUP_INTERP)
-        CFG.TOPUP_INTERP = cfgRaw.TOPUP_INTERP;
-    else
-        CFG.TOPUP_INTERP = 'spline';
-    end
-end
-
-% Precalculated fieldmap parameters (only used when PREPROC_MODE=precalc_fieldmap)
-% The fieldmap and its magnitude are what make_fieldmaps.sh writes into fmap/.
-% The extension is appended by the search, so strip it if the pattern was
-% written with one (the ROI patterns in the same config do include it).
+% Finding the fieldmap inputs. The search appends the extension, so strip
+% one if the pattern was written with it (the ROI patterns do carry theirs).
 stripExt = @(x) regexprep(x, '\.nii(\.gz)?$', '');
-if isfield(cfgRaw, 'FIELDMAP_PATTERN') && ~isempty(cfgRaw.FIELDMAP_PATTERN)
-    CFG.FIELDMAP_PATTERN = stripExt(cfgRaw.FIELDMAP_PATTERN);
-else
-    CFG.FIELDMAP_PATTERN = '_fieldmap';
-end
-if isfield(cfgRaw, 'FIELDMAP_MAGNITUDE_PATTERN') && ~isempty(cfgRaw.FIELDMAP_MAGNITUDE_PATTERN)
-    CFG.FIELDMAP_MAGNITUDE_PATTERN = stripExt(cfgRaw.FIELDMAP_MAGNITUDE_PATTERN);
-else
-    CFG.FIELDMAP_MAGNITUDE_PATTERN = '_magnitude';
-end
-% Units of the fieldmap on disk. fsl_prepare_fieldmap writes rad/s; SPM's
-% FieldMap toolbox expects Hz, so rad/s is divided by 2*pi before use.
-if isfield(cfgRaw, 'FIELDMAP_UNITS') && ~isempty(cfgRaw.FIELDMAP_UNITS)
-    CFG.FIELDMAP_UNITS = lower(strtrim(cfgRaw.FIELDMAP_UNITS));
-else
-    CFG.FIELDMAP_UNITS = 'rad/s';
-end
+CFG.FIELDMAP_PATTERN           = stripExt(cfg_or(cfgRaw, 'FIELDMAP_PATTERN', '_fieldmap'));
+CFG.FIELDMAP_MAGNITUDE_PATTERN = stripExt(cfg_or(cfgRaw, 'FIELDMAP_MAGNITUDE_PATTERN', '_magnitude'));
+CFG.FIELDMAP_UNITS             = lower(cfg_or(cfgRaw, 'FIELDMAP_UNITS', 'rad/s'));
 
-% Session mean settings
-CFG.DO_SESSION_MEAN = 1;
-CFG.SESSION_MEAN_NAME = 'meanu_session.nii';
+CFG.TOPUP_APPLY_METHOD       = cfg_or(cfgRaw, 'TOPUP_APPLY_METHOD', 'vdm');
+CFG.TOPUP_REVERSE_PE_DIR     = cfg_or(cfgRaw, 'TOPUP_REVERSE_PE_DIR', 'auto');
+CFG.TOPUP_REVERSE_PE_PATTERN = cfg_or(cfgRaw, 'TOPUP_REVERSE_PE_PATTERN', '');
+CFG.TOPUP_CONFIG             = cfg_or(cfgRaw, 'TOPUP_CONFIG', '');
+CFG.TOPUP_EXISTING_PREFIX    = cfg_or(cfgRaw, 'TOPUP_EXISTING_PREFIX', '');
 
-% VDM / FieldMap parameters
-CFG.VDM_WRAP = cfgRaw.VDM_WRAP;           % Should be [0 1 0] from config
-CFG.VDM_MASK = cfgRaw.VDM_MASK;
-CFG.VDMFLAGS_BASE = struct('udir', 1, 'rinterp', 4, 'wrap', CFG.VDM_WRAP, ...
-                           'mask', CFG.VDM_MASK, 'order', 1, 'prefix', 'vdm_');
+% Output prefixes. config.sh owns these because the shell scripts need them
+% too. FUNC_PREFIX is not stored anywhere: it is whatever these two produce.
+CFG.RESLICE_PREFIX = cfg_or(cfgRaw, 'RESLICE_PREFIX', 'u');
+CFG.SMOOTH_PREFIX  = cfg_or(cfgRaw, 'SMOOTH_PREFIX',  's');
+CFG.ROI_PREFIX     = cfg_or(cfgRaw, 'ROI_PREFIX',     'r');
+CFG.SMOOTH_FWHM    = str2double(cfg_or(cfgRaw, 'SMOOTH_FWHM', '0'));
 
-% Reslice / Unwarp options
-CFG.WHICHUNWARP = cfgRaw.RESLICE_WHICH;   % Should be [2 1] from config
-CFG.RESLICE_INTERP = cfgRaw.RESLICE_INTERP;
-CFG.RESLICE_WRAP = cfgRaw.RESLICE_WRAP;
-CFG.RESLICE_MASK = cfgRaw.RESLICE_MASK;
-CFG.RESLICE_PREFIX = cfgRaw.RESLICE_PREFIX;
-
-% Realign & Unwarp estimation options
-CFG.REALIGN_QUALITY = cfgRaw.REALIGN_QUALITY;
-CFG.REALIGN_SEP = cfgRaw.REALIGN_SEP;
-CFG.REALIGN_FWHM = cfgRaw.REALIGN_FWHM;
-CFG.REALIGN_RTM = cfgRaw.REALIGN_RTM;
-CFG.REALIGN_EINTERP = cfgRaw.REALIGN_EINTERP;
-CFG.REALIGN_EWRAP = cfgRaw.REALIGN_EWRAP;
-
-% Unwarp estimation options
-CFG.UNWARP_BASFCN = cfgRaw.UNWARP_BASFCN;
-CFG.UNWARP_REGORDER = cfgRaw.UNWARP_REGORDER;
-CFG.UNWARP_LAMBDA = cfgRaw.UNWARP_LAMBDA;
-CFG.UNWARP_JM = cfgRaw.UNWARP_JM;
-CFG.UNWARP_FOT = cfgRaw.UNWARP_FOT;
-CFG.UNWARP_SOT = cfgRaw.UNWARP_SOT;
-CFG.UNWARP_UWFWHM = cfgRaw.UNWARP_UWFWHM;
-CFG.UNWARP_REM = cfgRaw.UNWARP_REM;
-CFG.UNWARP_NOI = cfgRaw.UNWARP_NOI;
-CFG.UNWARP_EXPROUND = cfgRaw.UNWARP_EXPROUND;
-
-% VDM unwarp flags
-CFG.VDM_UFLAGS_METHOD = cfgRaw.VDM_UFLAGS_METHOD;
-CFG.VDM_UFLAGS_FWHM = cfgRaw.VDM_UFLAGS_FWHM;
-CFG.VDM_UFLAGS_PAD = cfgRaw.VDM_UFLAGS_PAD;
-CFG.VDM_UFLAGS_WS = cfgRaw.VDM_UFLAGS_WS;
-
-% Coregistration options
-CFG.COREG_COST_FUN = cfgRaw.COREG_COST_FUN;
-CFG.COREG_SEP = cfgRaw.COREG_SEP;
-CFG.COREG_FWHM = cfgRaw.COREG_FWHM;
-CFG.COREG_ROI_INTERP = cfgRaw.COREG_ROI_INTERP;
-
-% Smoothing (optional — off by default)
-if isfield(cfgRaw, 'SMOOTH_FWHM') && ~isempty(cfgRaw.SMOOTH_FWHM)
-    CFG.SMOOTH_FWHM = cfgRaw.SMOOTH_FWHM;
-else
-    CFG.SMOOTH_FWHM = 0;  % default: no smoothing
-end
-if isfield(cfgRaw, 'SMOOTH_PREFIX') && ~isempty(cfgRaw.SMOOTH_PREFIX)
-    CFG.SMOOTH_PREFIX = cfgRaw.SMOOTH_PREFIX;
-else
-    CFG.SMOOTH_PREFIX = 's';
-end
-
-% Pre-computed FSL topup output (optional).
-% Points at topup results you produced yourself, so the "topup" stage can be
-% skipped. {SUB} and {SES} are substituted. Empty = use <func>/topup_results.
-if isfield(cfgRaw, 'TOPUP_EXISTING_PREFIX') && ~isempty(cfgRaw.TOPUP_EXISTING_PREFIX)
-    CFG.TOPUP_EXISTING_PREFIX = cfgRaw.TOPUP_EXISTING_PREFIX;
-else
-    CFG.TOPUP_EXISTING_PREFIX = '';
-end
+% ---- from spm_options.m ----
+% Batch options are read straight off CFG.spm where they are used. These
+% few are also needed outside a batch, so they get a short name here.
+CFG.TR                   = OPT.TR;
+CFG.DO_SESSION_MEAN      = OPT.session_mean.enabled;
+CFG.SESSION_MEAN_NAME    = OPT.session_mean.name;
+CFG.TOPUP_PE_DIR_BOLD    = OPT.topup.pe_dir_bold;
+CFG.TOPUP_PE_DIR_REVERSE = OPT.topup.pe_dir_reverse;
+CFG.TOPUP_READOUT_SEC    = OPT.topup.readout_sec;
+CFG.TOPUP_INTERP         = OPT.topup.interp;
 
 % --------- Resolve which stages to run ----------
 % Explicit argument wins over PREPROC_STAGES in the config file.
@@ -711,7 +598,7 @@ for ii = 1:nTasks
         error('run_spm_preproc:NoBold', [ ...
             'No BOLD file for task-%s in %s\n' ...
             'Expected something like %s_%s_task-%s[_run-N]_bold.nii[.gz]\n' ...
-            'Check the TASKS setting in pipeline_config.cfg against the filenames.'], ...
+            'Check the TASKS setting in config.sh against the filenames.'], ...
             tLabel, rawFuncDir, SUB, SES, tLabel);
     end
 end
@@ -969,7 +856,7 @@ assert(~isempty(cands), [ ...
     '  Pattern:  %s\n' ...
     '  Searched: %s\n' ...
     '  TOPUP_REVERSE_PE_DIR: %s\n' ...
-    'Adjust TOPUP_REVERSE_PE_PATTERN in pipeline_config.cfg.'], ...
+    'Adjust TOPUP_REVERSE_PE_PATTERN in config.sh.'], ...
     SUB, SES, pattern, strjoin(searchDirs, ', '), CFG.TOPUP_REVERSE_PE_DIR);
 
 [reverseFile, info] = bids_pick_run(cands, struct( ...
@@ -1222,38 +1109,16 @@ matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.data.presubphasemag.phase   
 matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.data.presubphasemag.magnitude = {magnitude1};
 matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.session.epi = {epiRef};
 
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.et        = [CFG.TE_SHORT CFG.TE_LONG];
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.maskbrain = CFG.MASKBRAIN;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.blipdir   = CFG.BLIPDIR;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.tert      = CFG.TOTAL_READOUT;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.epifm     = CFG.EPI_BASED_FIELDMAP;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.ajm       = 0;
-
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.uflags.method = CFG.VDM_UFLAGS_METHOD;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.uflags.fwhm   = CFG.VDM_UFLAGS_FWHM;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.uflags.pad    = CFG.VDM_UFLAGS_PAD;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.uflags.ws     = CFG.VDM_UFLAGS_WS;
-
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.template = {fullfile(spm('Dir'),'toolbox','FieldMap','T1.nii')};
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.fwhm = 5;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.nerode = 2;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.ndilate = 4;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.thresh = 0.5;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.reg = 0.02;
-
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.matchvdm      = 1;  % write VDM matched to epiRef
+% Everything SPM's FieldMap toolbox takes, straight from spm_options.m.
+% Add any field SPM accepts there and it arrives here unchanged.
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval = fieldmap_defaults(CFG);
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.vdmflags      = CFG.spm.fieldmap.vdmflags;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.matchvdm      = CFG.spm.fieldmap.matchvdm;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.writeunwarped = CFG.spm.fieldmap.writeunwarped;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.matchanat     = CFG.spm.fieldmap.matchanat;
 matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.sessname      = sprintf('task-%s', taskLabel);
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.writeunwarped = 0;
-
-% These avoid "incomplete module inputs" errors on some installs
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.anat      = {''};
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.matchanat = 0;
-
-% vdmflags: keep them, but DON'T depend on prefix to identify output
-% (prefix may get ignored/overridden, but flags still help define output behavior)
-vdmflags = CFG.VDMFLAGS_BASE;
-% Leave prefix at whatever you set in CFG.VDMFLAGS_BASE (e.g., 'vdm_') or default-like 'vdm5_'
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.vdmflags = vdmflags;
+% Avoids "incomplete module inputs" errors on some installs.
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.anat          = {''};
 
 % ---- Run job (run from funcDir to make outputs more likely to land there) ----
 oldpwd = pwd;
@@ -1298,6 +1163,17 @@ fprintf('Renamed VDM -> %s\n', vdm_out);
 end
 
 % ---------------- helper: list VDM candidates ----------------
+function d = fieldmap_defaults(CFG)
+% FIELDMAP_DEFAULTS  SPM FieldMap defaults, with the brain-mask template filled in.
+%
+% spm_options.m leaves mflags.template empty so that reading the settings
+% does not require SPM to be loaded. SPM's own T1 template is the default.
+d = CFG.spm.fieldmap.defaultsval;
+if isempty(d.mflags.template) || isempty(d.mflags.template{1})
+    d.mflags.template = {fullfile(spm('Dir'), 'toolbox', 'FieldMap', 'T1.nii')};
+end
+end
+
 function files = list_vdm_candidates(folders)
 % LIST_VDM_CANDIDATES  Snapshot the vdm* files across one or more folders.
 %
@@ -1376,33 +1252,14 @@ for i = 1:n
     matlabbatch{1}.spm.spatial.realignunwarp.data(i).pmscan = {taskVDM{i}};
 end
 
-% Estimation options (from config)
-matlabbatch{1}.spm.spatial.realignunwarp.eoptions.quality = CFG.REALIGN_QUALITY;
-matlabbatch{1}.spm.spatial.realignunwarp.eoptions.sep     = CFG.REALIGN_SEP;
-matlabbatch{1}.spm.spatial.realignunwarp.eoptions.fwhm    = CFG.REALIGN_FWHM;
-matlabbatch{1}.spm.spatial.realignunwarp.eoptions.rtm     = CFG.REALIGN_RTM;
-matlabbatch{1}.spm.spatial.realignunwarp.eoptions.einterp = CFG.REALIGN_EINTERP;
-matlabbatch{1}.spm.spatial.realignunwarp.eoptions.ewrap   = CFG.REALIGN_EWRAP;
-matlabbatch{1}.spm.spatial.realignunwarp.eoptions.weight  = '';
+% Options come straight from spm_options.m. Add any field SPM accepts
+% there and it arrives here without a change to this file.
+uwroptions        = CFG.spm.realignunwarp.uwroptions;
+uwroptions.prefix = CFG.RESLICE_PREFIX;      % config.sh owns the prefix
 
-% Unwarp options (from config)
-matlabbatch{1}.spm.spatial.realignunwarp.uweoptions.basfcn = CFG.UNWARP_BASFCN;
-matlabbatch{1}.spm.spatial.realignunwarp.uweoptions.regorder = CFG.UNWARP_REGORDER;
-matlabbatch{1}.spm.spatial.realignunwarp.uweoptions.lambda = CFG.UNWARP_LAMBDA;
-matlabbatch{1}.spm.spatial.realignunwarp.uweoptions.jm = CFG.UNWARP_JM;
-matlabbatch{1}.spm.spatial.realignunwarp.uweoptions.fot = CFG.UNWARP_FOT;
-matlabbatch{1}.spm.spatial.realignunwarp.uweoptions.sot = CFG.UNWARP_SOT;
-matlabbatch{1}.spm.spatial.realignunwarp.uweoptions.uwfwhm = CFG.UNWARP_UWFWHM;
-matlabbatch{1}.spm.spatial.realignunwarp.uweoptions.rem = CFG.UNWARP_REM;
-matlabbatch{1}.spm.spatial.realignunwarp.uweoptions.noi = CFG.UNWARP_NOI;
-matlabbatch{1}.spm.spatial.realignunwarp.uweoptions.expround = CFG.UNWARP_EXPROUND;
-
-% Reslice options (from config)
-matlabbatch{1}.spm.spatial.realignunwarp.uwroptions.uwwhich = CFG.WHICHUNWARP;
-matlabbatch{1}.spm.spatial.realignunwarp.uwroptions.rinterp = CFG.RESLICE_INTERP;
-matlabbatch{1}.spm.spatial.realignunwarp.uwroptions.wrap = CFG.RESLICE_WRAP;
-matlabbatch{1}.spm.spatial.realignunwarp.uwroptions.mask = CFG.RESLICE_MASK;
-matlabbatch{1}.spm.spatial.realignunwarp.uwroptions.prefix = CFG.RESLICE_PREFIX;
+matlabbatch{1}.spm.spatial.realignunwarp.eoptions   = CFG.spm.realignunwarp.eoptions;
+matlabbatch{1}.spm.spatial.realignunwarp.uweoptions = CFG.spm.realignunwarp.uweoptions;
+matlabbatch{1}.spm.spatial.realignunwarp.uwroptions = uwroptions;
 
 spm_jobman('run', matlabbatch);
 end
@@ -1421,21 +1278,13 @@ for i = 1:n
     matlabbatch{1}.spm.spatial.realign.estwrite.data{i} = taskVols{i};
 end
 
-% Estimation options (from config)
-matlabbatch{1}.spm.spatial.realign.estwrite.eoptions.quality = CFG.REALIGN_QUALITY;
-matlabbatch{1}.spm.spatial.realign.estwrite.eoptions.sep = CFG.REALIGN_SEP;
-matlabbatch{1}.spm.spatial.realign.estwrite.eoptions.fwhm = CFG.REALIGN_FWHM;
-matlabbatch{1}.spm.spatial.realign.estwrite.eoptions.rtm = CFG.REALIGN_RTM;
-matlabbatch{1}.spm.spatial.realign.estwrite.eoptions.interp = CFG.REALIGN_EINTERP;
-matlabbatch{1}.spm.spatial.realign.estwrite.eoptions.wrap = CFG.REALIGN_EWRAP;
-matlabbatch{1}.spm.spatial.realign.estwrite.eoptions.weight = '';
+% Options from spm_options.m. Note SPM names these differently from
+% Realign & Unwarp: 'interp'/'wrap' here, 'einterp'/'ewrap' there.
+roptions        = CFG.spm.realign.roptions;
+roptions.prefix = CFG.RESLICE_PREFIX;        % config.sh owns the prefix
 
-% Reslice options
-matlabbatch{1}.spm.spatial.realign.estwrite.roptions.which = [2 1];  % Write resliced + mean
-matlabbatch{1}.spm.spatial.realign.estwrite.roptions.interp = CFG.RESLICE_INTERP;
-matlabbatch{1}.spm.spatial.realign.estwrite.roptions.wrap = CFG.RESLICE_WRAP;
-matlabbatch{1}.spm.spatial.realign.estwrite.roptions.mask = CFG.RESLICE_MASK;
-matlabbatch{1}.spm.spatial.realign.estwrite.roptions.prefix = CFG.RESLICE_PREFIX;
+matlabbatch{1}.spm.spatial.realign.estwrite.eoptions = CFG.spm.realign.eoptions;
+matlabbatch{1}.spm.spatial.realign.estwrite.roptions = roptions;
 
 spm_jobman('run', matlabbatch);
 end
@@ -1468,17 +1317,13 @@ matlabbatch = {};
 matlabbatch{1}.spm.spatial.coreg.estwrite.ref = {refEPI};
 matlabbatch{1}.spm.spatial.coreg.estwrite.source = {t2w};
 matlabbatch{1}.spm.spatial.coreg.estwrite.other = roiFiles(:);
-matlabbatch{1}.spm.spatial.coreg.estwrite.eoptions.cost_fun = CFG.COREG_COST_FUN;
-matlabbatch{1}.spm.spatial.coreg.estwrite.eoptions.sep = CFG.COREG_SEP;
-matlabbatch{1}.spm.spatial.coreg.estwrite.eoptions.tol = ...
-    [0.0200 0.0200 0.0200 0.0010 0.0010 0.0010 0.0100 0.0100 0.0100 0.0010 0.0010 0.0010];
-matlabbatch{1}.spm.spatial.coreg.estwrite.eoptions.fwhm = CFG.COREG_FWHM;
+% Options from spm_options.m. roptions.interp defaults to 0 there
+% (nearest neighbour), which is the correct choice for label masks.
+roptions        = CFG.spm.coreg.roptions;
+roptions.prefix = CFG.ROI_PREFIX;            % config.sh owns the prefix
 
-% Reslicing options: NN for masks
-matlabbatch{1}.spm.spatial.coreg.estwrite.roptions.interp = CFG.COREG_ROI_INTERP; % 0 = nearest neighbor for masks
-matlabbatch{1}.spm.spatial.coreg.estwrite.roptions.wrap = [0 0 0];
-matlabbatch{1}.spm.spatial.coreg.estwrite.roptions.mask = 0;
-matlabbatch{1}.spm.spatial.coreg.estwrite.roptions.prefix = 'r';
+matlabbatch{1}.spm.spatial.coreg.estwrite.eoptions = CFG.spm.coreg.eoptions;
+matlabbatch{1}.spm.spatial.coreg.estwrite.roptions = roptions;
 
 spm_jobman('run', matlabbatch);
 end
@@ -1519,12 +1364,11 @@ if isscalar(fwhm)
     fwhm = [fwhm fwhm fwhm];
 end
 
-% Build and run SPM smooth batch
 matlabbatch = {};
 matlabbatch{1}.spm.spatial.smooth.data   = boldFiles(:);
 matlabbatch{1}.spm.spatial.smooth.fwhm   = fwhm;
-matlabbatch{1}.spm.spatial.smooth.dtype  = 0;   % same datatype as input
-matlabbatch{1}.spm.spatial.smooth.im     = 0;   % no implicit masking
+matlabbatch{1}.spm.spatial.smooth.dtype  = CFG.spm.smooth.dtype;
+matlabbatch{1}.spm.spatial.smooth.im     = CFG.spm.smooth.im;
 matlabbatch{1}.spm.spatial.smooth.prefix = CFG.SMOOTH_PREFIX;
 
 spm_jobman('run', matlabbatch);
@@ -1591,33 +1435,16 @@ matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.data.precalcfieldmap.precalc
 matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.data.precalcfieldmap.magfieldmap     = {magFile};
 matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.session.epi = {epiRef};
 
-% Echo times are unused for a precalculated fieldmap (no phase to unwrap), but
-% the batch still requires the defaults structure to be complete.
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.et        = [CFG.TE_SHORT CFG.TE_LONG];
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.maskbrain = CFG.MASKBRAIN;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.blipdir   = CFG.BLIPDIR;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.tert      = CFG.TOTAL_READOUT;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.epifm     = CFG.EPI_BASED_FIELDMAP;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.ajm       = 0;
-
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.uflags.method = CFG.VDM_UFLAGS_METHOD;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.uflags.fwhm   = CFG.VDM_UFLAGS_FWHM;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.uflags.pad    = CFG.VDM_UFLAGS_PAD;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.uflags.ws     = CFG.VDM_UFLAGS_WS;
-
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.template = {fullfile(spm('Dir'),'toolbox','FieldMap','T1.nii')};
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.fwhm = 5;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.nerode = 2;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.ndilate = 4;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.thresh = 0.5;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval.mflags.reg = 0.02;
-
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.matchvdm      = 1;  % write VDM matched to epiRef
+% Everything SPM's FieldMap toolbox takes, straight from spm_options.m.
+% Add any field SPM accepts there and it arrives here unchanged.
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.defaults.defaultsval = fieldmap_defaults(CFG);
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.vdmflags      = CFG.spm.fieldmap.vdmflags;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.matchvdm      = CFG.spm.fieldmap.matchvdm;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.writeunwarped = CFG.spm.fieldmap.writeunwarped;
+matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.matchanat     = CFG.spm.fieldmap.matchanat;
 matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.sessname      = sprintf('task-%s', taskLabel);
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.writeunwarped = 0;
+% Avoids "incomplete module inputs" errors on some installs.
 matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.anat          = {''};
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.matchanat     = 0;
-matlabbatch{1}.spm.tools.fieldmap.calculatevdm.subj.vdmflags      = CFG.VDMFLAGS_BASE;
 
 % ---- Run job (from funcDir, so outputs are more likely to land there) ----
 oldpwd = pwd;
@@ -1912,6 +1739,9 @@ function validate_bids_params(boldFiles, reverseFile, phasediffFile, fieldmapFil
 % Nothing here stops the pipeline. The config values are always the ones used,
 % because they are sometimes deliberate overrides.
 
+% Acquisition parameters live in spm_options.m, in the shape SPM wants them.
+fm = CFG.spm.fieldmap.defaultsval;   % .et = [TE1 TE2], .tert, .blipdir
+
 fprintf('\n--- Validating config against the BIDS JSON sidecars ---\n');
 nWarnings = 0;
 
@@ -1986,12 +1816,12 @@ if ~isempty(boldJson)
                 % Check blip direction consistency: j -> +1, j- -> -1
                 expectedBlip = 1;
                 if endsWith(bidsPE, '-'), expectedBlip = -1; end
-                if CFG.BLIPDIR ~= expectedBlip
+                if fm.blipdir ~= expectedBlip
                     fprintf('  WARNING: BLIP_DIRECTION mismatch — config: %d, BIDS JSON PE=%s suggests: %d\n', ...
-                        CFG.BLIPDIR, bidsPE, expectedBlip);
+                        fm.blipdir, bidsPE, expectedBlip);
                     nWarnings = nWarnings + 1;
                 else
-                    fprintf('  BLIP_DIRECTION: %d (consistent with BIDS PE=%s)\n', CFG.BLIPDIR, bidsPE);
+                    fprintf('  BLIP_DIRECTION: %d (consistent with BIDS PE=%s)\n', fm.blipdir, bidsPE);
                 end
             else
                 fprintf('  BIDS JSON has PhaseEncodingAxis=%s only (no sign) — cannot verify BLIP_DIRECTION.\n', bidsPE);
@@ -2033,9 +1863,9 @@ if ~isempty(boldJson)
             bidsReadout = bj.EstimatedTotalReadoutTime * 1000;
         end
         if ~isempty(bidsReadout)
-            if abs(CFG.TOTAL_READOUT - bidsReadout) > 1  % tolerance 1 ms
+            if abs(fm.tert - bidsReadout) > 1  % tolerance 1 ms
                 fprintf('  WARNING: Readout time mismatch — config TOTAL_READOUT_MS: %.3f ms, BIDS JSON: %.3f ms\n', ...
-                    CFG.TOTAL_READOUT, bidsReadout);
+                    fm.tert, bidsReadout);
                 nWarnings = nWarnings + 1;
             else
                 fprintf('  Readout time (VDM): %.3f ms (matches)\n', bidsReadout);
@@ -2128,16 +1958,16 @@ if strcmp(CFG.PREPROC_MODE, 'realign_unwarp') && ~isempty(phasediffFile)
         if isfield(pj, 'EchoTime1') && isfield(pj, 'EchoTime2')
             bidsTE1 = pj.EchoTime1 * 1000;  % to ms
             bidsTE2 = pj.EchoTime2 * 1000;
-            if abs(CFG.TE_SHORT - bidsTE1) > 0.01
+            if abs(fm.et(1) - bidsTE1) > 0.01
                 fprintf('  WARNING: TE1 mismatch — config TE_SHORT_MS: %.3f ms, BIDS JSON EchoTime1: %.3f ms\n', ...
-                    CFG.TE_SHORT, bidsTE1);
+                    fm.et(1), bidsTE1);
                 nWarnings = nWarnings + 1;
             else
                 fprintf('  TE1: %.3f ms (matches)\n', bidsTE1);
             end
-            if abs(CFG.TE_LONG - bidsTE2) > 0.01
+            if abs(fm.et(2) - bidsTE2) > 0.01
                 fprintf('  WARNING: TE2 mismatch — config TE_LONG_MS: %.3f ms, BIDS JSON EchoTime2: %.3f ms\n', ...
-                    CFG.TE_LONG, bidsTE2);
+                    fm.et(2), bidsTE2);
                 nWarnings = nWarnings + 1;
             else
                 fprintf('  TE2: %.3f ms (matches)\n', bidsTE2);
@@ -2184,11 +2014,11 @@ if strcmp(CFG.PREPROC_MODE, 'precalc_fieldmap') && ~isempty(fieldmapFile)
 
     % A GRE-derived fieldmap is not EPI-based; getting this backwards inverts
     % how SPM matches the VDM to the EPI.
-    if CFG.EPI_BASED_FIELDMAP ~= 0
+    if fm.epifm ~= 0
         fprintf(['  WARNING: EPI_BASED_FIELDMAP=%d with PREPROC_MODE=precalc_fieldmap.\n' ...
                  '           A fieldmap made from a GRE phasediff (make_fieldmaps.sh)\n' ...
                  '           is NOT EPI-based — set EPI_BASED_FIELDMAP=0.\n'], ...
-                CFG.EPI_BASED_FIELDMAP);
+                fm.epifm);
         nWarnings = nWarnings + 1;
     end
 end
@@ -2261,56 +2091,65 @@ end
 % ===================== PROVENANCE LOG =====================
 
 function save_provenance_log(DER, SUB, SES, CFG, cfgFile, taskBoldFiles, boldPicks, stagesRun)
-% SAVE_PROVENANCE_LOG  Write a JSON log of all preprocessing settings used.
+% SAVE_PROVENANCE_LOG  Record what this run did, and what it was told to do.
 %
-% Saved as preproc_provenance.json at the top of the session's derivatives.
-% Contains the preprocessing mode, the stages this run executed, which run of
-% each scan it chose, all key parameters, timestamps, software versions, and
-% input files.
+% Writes three things to the top of the session's derivatives:
 %
-% The JSON always describes the most recent run. Because stages can be run
-% separately, a running history of (timestamp, mode, stages) is also appended
-% to preproc_stages.log next to it.
+%   config.sh          \  verbatim copies of the settings this run used, so
+%   spm_options.m      /  the record cannot drift from the code
+%   preproc_provenance.json   what ran, on which inputs, with which software
+%
+% Copying the settings files is deliberate. An earlier version listed every
+% parameter by hand, which meant adding a setting took three edits and the
+% log silently went stale whenever someone forgot one.
+%
+% The JSON describes the most recent run. Because stages can be run
+% separately, a running history is also appended to preproc_stages.log.
 
-funcDir = DER.func;
 logFile = fullfile(DER.sesDir, 'preproc_provenance.json');
-fprintf('\nSaving provenance log: %s\n', logFile);
+fprintf('\nSaving provenance: %s\n', logFile);
 
+% ---- Copy the settings files next to the output ----
+settingsDir = fileparts(cfgFile);
+for f = {'config.sh', 'spm_options.m'}
+    src = fullfile(settingsDir, f{1});
+    if isfile(src)
+        copyfile(src, fullfile(DER.sesDir, f{1}));
+    else
+        warning('Could not copy %s for provenance (not found at %s)', f{1}, src);
+    end
+end
+
+% ---- What ran ----
 prov = struct();
-
-% --- Metadata ---
-prov.created = datestr(now, 'yyyy-mm-ddTHH:MM:SS');
-prov.subject = SUB;
-prov.session = SES;
-prov.config_file = cfgFile;
+prov.created      = datestr(now, 'yyyy-mm-ddTHH:MM:SS');
+prov.subject      = SUB;
+prov.session      = SES;
 prov.preproc_mode = CFG.PREPROC_MODE;
-prov.stages_run = stagesRun;
+prov.stages_run   = stagesRun;
+prov.settings     = {'config.sh', 'spm_options.m'};   % copied alongside
 
-% --- Software versions ---
-prov.software.spm_dir = CFG.SPM_DIR;
+% ---- Software ----
+prov.software.spm_dir        = CFG.SPM_DIR;
+prov.software.matlab_version = version;
 try
     prov.software.spm_version = spm('Version');
 catch
     prov.software.spm_version = 'unknown';
 end
-prov.software.matlab_version = version;
 if strcmp(CFG.PREPROC_MODE, 'topup')
     [st, fslVer] = system('cat $FSLDIR/etc/fslversion 2>/dev/null');
-    if st == 0
-        prov.software.fsl_version = strtrim(fslVer);
-    else
-        prov.software.fsl_version = 'unknown';
-    end
+    prov.software.fsl_version = tern(st == 0, strtrim(fslVer), 'unknown');
 end
 
-% --- Input files, and which run of each was chosen ---
-prov.inputs.task_labels = CFG.TASK_LABELS;
-prov.inputs.bold_files = taskBoldFiles;
+% ---- Inputs, and which run of each scan was chosen ----
+prov.inputs.task_labels     = CFG.TASK_LABELS;
+prov.inputs.bold_files      = taskBoldFiles;
 prov.inputs.derivatives_dir = DER.sesDir;
-prov.inputs.deriv_reset = CFG.DERIV_RESET;
+prov.inputs.deriv_reset     = CFG.DERIV_RESET;
 
-prov.run_selection.file = CFG.RUN_SELECTION_FILE;
-prov.run_selection.strict = CFG.STRICT_RUN_MATCHING;
+prov.run_selection.file          = CFG.RUN_SELECTION_FILE;
+prov.run_selection.strict        = CFG.STRICT_RUN_MATCHING;
 prov.run_selection.match_gap_min = CFG.RUN_MATCH_GAP_SEC / 60;
 for i = 1:numel(boldPicks)
     if isempty(boldPicks(i).path), continue; end
@@ -2321,142 +2160,17 @@ for i = 1:numel(boldPicks)
         'reason', boldPicks(i).reason);
 end
 
-% --- Acquisition parameters ---
-if isfield(CFG, 'TR'), prov.acquisition.TR = CFG.TR; end
-prov.acquisition.total_readout_ms = CFG.TOTAL_READOUT;
-prov.acquisition.te_short_ms = CFG.TE_SHORT;
-prov.acquisition.te_long_ms = CFG.TE_LONG;
-prov.acquisition.blip_direction = CFG.BLIPDIR;
-prov.acquisition.epi_based_fieldmap = CFG.EPI_BASED_FIELDMAP;
-
-% --- Precalculated fieldmap parameters (if applicable) ---
-if strcmp(CFG.PREPROC_MODE, 'precalc_fieldmap')
-    prov.fieldmap.units = CFG.FIELDMAP_UNITS;
-    prov.fieldmap.pattern = CFG.FIELDMAP_PATTERN;
-    prov.fieldmap.magnitude_pattern = CFG.FIELDMAP_MAGNITUDE_PATTERN;
-end
-
-% --- Topup parameters (if applicable) ---
-if strcmp(CFG.PREPROC_MODE, 'topup')
-    prov.topup.pe_dir_bold = CFG.TOPUP_PE_DIR_BOLD;
-    prov.topup.pe_dir_reverse = CFG.TOPUP_PE_DIR_REVERSE;
-    prov.topup.readout_sec = CFG.TOPUP_READOUT_SEC;
-    prov.topup.apply_method = CFG.TOPUP_APPLY_METHOD;
-    prov.topup.interp = CFG.TOPUP_INTERP;
-    prov.topup.reverse_pe_pattern = CFG.TOPUP_REVERSE_PE_PATTERN;
-    prov.topup.config = CFG.TOPUP_CONFIG;
-end
-
-% --- Realign parameters ---
-prov.realign.quality = CFG.REALIGN_QUALITY;
-prov.realign.sep = CFG.REALIGN_SEP;
-prov.realign.fwhm = CFG.REALIGN_FWHM;
-prov.realign.rtm = CFG.REALIGN_RTM;
-prov.realign.einterp = CFG.REALIGN_EINTERP;
-prov.realign.ewrap = CFG.REALIGN_EWRAP;
-
-% --- Unwarp parameters ---
-prov.unwarp.basfcn = CFG.UNWARP_BASFCN;
-prov.unwarp.regorder = CFG.UNWARP_REGORDER;
-prov.unwarp.lambda = CFG.UNWARP_LAMBDA;
-prov.unwarp.jm = CFG.UNWARP_JM;
-prov.unwarp.fot = CFG.UNWARP_FOT;
-prov.unwarp.sot = CFG.UNWARP_SOT;
-prov.unwarp.uwfwhm = CFG.UNWARP_UWFWHM;
-prov.unwarp.rem = CFG.UNWARP_REM;
-prov.unwarp.noi = CFG.UNWARP_NOI;
-prov.unwarp.expround = CFG.UNWARP_EXPROUND;
-
-% --- Reslice parameters ---
-prov.reslice.which = CFG.WHICHUNWARP;
-prov.reslice.interp = CFG.RESLICE_INTERP;
-prov.reslice.wrap = CFG.RESLICE_WRAP;
-prov.reslice.mask = CFG.RESLICE_MASK;
-prov.reslice.prefix = CFG.RESLICE_PREFIX;
-
-% --- VDM parameters ---
-prov.vdm.wrap = CFG.VDM_WRAP;
-prov.vdm.mask = CFG.VDM_MASK;
-prov.vdm.maskbrain = CFG.MASKBRAIN;
-prov.vdm.uflags_method = CFG.VDM_UFLAGS_METHOD;
-prov.vdm.uflags_fwhm = CFG.VDM_UFLAGS_FWHM;
-prov.vdm.uflags_pad = CFG.VDM_UFLAGS_PAD;
-prov.vdm.uflags_ws = CFG.VDM_UFLAGS_WS;
-
-% --- Coregistration parameters ---
-prov.coreg.cost_fun = CFG.COREG_COST_FUN;
-prov.coreg.sep = CFG.COREG_SEP;
-prov.coreg.fwhm = CFG.COREG_FWHM;
-prov.coreg.roi_interp = CFG.COREG_ROI_INTERP;
-prov.coreg.do_coreg_rois = CFG.DO_COREG_ROIS;
-
-% --- Smoothing parameters ---
-if isfield(CFG, 'SMOOTH_FWHM')
-    prov.smoothing.fwhm = CFG.SMOOTH_FWHM;
-    prov.smoothing.prefix = CFG.SMOOTH_PREFIX;
-    prov.smoothing.applied = CFG.SMOOTH_FWHM > 0;
-end
-
-% --- BIDS JSON values (for cross-reference) ---
-% The sidecar of the BOLD run this session actually used — not whichever
-% sidecar happened to sort first, which said the wrong thing for multi-run
-% sessions.
-boldJson = '';
-for i = 1:numel(taskBoldFiles)
-    if isempty(taskBoldFiles{i}), continue; end
-    cand = regexprep(taskBoldFiles{i}, '\.nii(\.gz)?$', '.json');
-    if isfile(cand)
-        boldJson = cand;
-        break;
-    end
-end
-if ~isempty(boldJson)
-    bj = read_json_file(boldJson);
-    prov.bids_json.source_file = boldJson;
-    if isfield(bj, 'RepetitionTime')
-        prov.bids_json.RepetitionTime = bj.RepetitionTime;
-    end
-    if isfield(bj, 'EstimatedTotalReadoutTime')
-        prov.bids_json.EstimatedTotalReadoutTime = bj.EstimatedTotalReadoutTime;
-    end
-    if isfield(bj, 'TotalReadoutTime')
-        prov.bids_json.TotalReadoutTime = bj.TotalReadoutTime;
-    end
-    if isfield(bj, 'PhaseEncodingDirection')
-        prov.bids_json.PhaseEncodingDirection = bj.PhaseEncodingDirection;
-    end
-    if isfield(bj, 'PhaseEncodingAxis')
-        prov.bids_json.PhaseEncodingAxis = bj.PhaseEncodingAxis;
-    end
-    if isfield(bj, 'EffectiveEchoSpacing')
-        prov.bids_json.EffectiveEchoSpacing = bj.EffectiveEchoSpacing;
-    end
-    if isfield(bj, 'EstimatedEffectiveEchoSpacing')
-        prov.bids_json.EstimatedEffectiveEchoSpacing = bj.EstimatedEffectiveEchoSpacing;
-    end
-    if isfield(bj, 'EchoTime')
-        prov.bids_json.EchoTime = bj.EchoTime;
-    end
-end
-
-% --- Write JSON ---
-jsonText = jsonencode(prov);
-% Pretty-print: add newlines after { and , for readability
-jsonText = strrep(jsonText, ',"', sprintf(',\n  "'));
-jsonText = strrep(jsonText, '{"', sprintf('{\n  "'));
-jsonText = strrep(jsonText, '}', sprintf('\n}'));
-
+% ---- Write ----
 fid = fopen(logFile, 'w');
 if fid > 0
-    fprintf(fid, '%s\n', jsonText);
+    fprintf(fid, '%s\n', jsonencode(prov, 'PrettyPrint', true));
     fclose(fid);
-    fprintf('  Provenance log saved.\n');
 else
     warning('Could not write provenance log: %s', logFile);
 end
 
-% --- Append this run to the stage history ---
-stageLog = fullfile(funcDir, 'preproc_stages.log');
+% Running history, so a resumed run does not erase what came before.
+stageLog = fullfile(DER.sesDir, 'preproc_stages.log');
 fid = fopen(stageLog, 'a');
 if fid > 0
     fprintf(fid, '%s\t%s\t%s\t%s\n', prov.created, CFG.PREPROC_MODE, ...
@@ -2601,7 +2315,7 @@ assert(isempty(missing), [ ...
     'The "topup" stage was not selected, so these files have to exist already.\n' ...
     'Either add "topup" to the stage list, copy your topup output next to\n' ...
     '  %s\n' ...
-    'or set TOPUP_EXISTING_PREFIX in pipeline_config.cfg to point at it.'], ...
+    'or set TOPUP_EXISTING_PREFIX in config.sh to point at it.'], ...
     strjoin(missing, sprintf('\n  ')), topupPrefix);
 end
 

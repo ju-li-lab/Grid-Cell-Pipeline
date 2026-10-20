@@ -28,7 +28,7 @@
 #  This dataset survives a preprocessing re-run: rebuilding a fieldmap means
 #  another FSL pass, so it is only redone when you ask with --force.
 #
-#  Then set PREPROC_MODE=precalc_fieldmap in pipeline_config.cfg and run the
+#  Then set PREPROC_MODE=precalc_fieldmap in config.sh and run the
 #  preprocessing as usual.
 #
 #  When a session has several phasediffs and several T1w runs, each phasediff
@@ -47,7 +47,7 @@
 #    --sub SUB          Process one subject...
 #    --ses SES          ...and this session (both required together).
 #    --list FILE        Subject-session list (default: <script dir>/subses_list.txt).
-#    --config FILE      Config file (default: <script dir>/pipeline_config.cfg).
+#    --config FILE      Config file (default: <script dir>/config.sh).
 #    --magnitude-source structural|auto
 #                       structural = always build the magnitude from the T1w
 #                                    (default; keeps every session identical).
@@ -65,7 +65,7 @@ set -euo pipefail
 
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-CONFIG_FILE="${SELF_DIR}/pipeline_config.cfg"
+CONFIG_FILE="${SELF_DIR}/config.sh"
 SUB_ARG=""
 SES_ARG=""
 LIST=""
@@ -113,7 +113,7 @@ source "$CONFIG_FILE"
 # shellcheck disable=SC1091
 source "${SELF_DIR}/bids_common.sh"
 
-: "${BIDS_ROOT:?ERROR: BIDS_ROOT not set in pipeline_config.cfg}"
+: "${BIDS_ROOT:?ERROR: BIDS_ROOT not set in config.sh}"
 
 FMAP_DERIV="$(deriv_fieldmaps)" || {
     err "Cannot resolve the derivatives root — set OUTPUT_ROOT or DERIV_ROOT."
@@ -545,7 +545,7 @@ if [[ "$N_MADE" -gt 0 && "$DRY_RUN_EFF" != "true" ]]; then
     write_dataset_description "$FMAP_DERIV" "${DERIV_FIELDMAPS:-fieldmaps}" \
         "B0 fieldmaps built from T1w + phasediff with FSL (make_fieldmaps.sh)"
     printf "\nWritten to: ${BLUE}%s${NC}\n" "$FMAP_DERIV"
-    printf "Next: set ${BLUE}PREPROC_MODE=precalc_fieldmap${NC} in pipeline_config.cfg,\n"
+    printf "Next: set ${BLUE}PREPROC_MODE=precalc_fieldmap${NC} in config.sh,\n"
     printf "then run the preprocessing (menu option 2, or bash submit_preproc.sh).\n"
 fi
 

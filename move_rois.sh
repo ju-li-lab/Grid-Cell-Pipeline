@@ -41,7 +41,7 @@
 #   bash move_rois.sh --execute    # actually copy and rename
 #   bash move_rois.sh --force -x   # overwrite masks already imported
 #
-# All settings come from pipeline_config.cfg.
+# All settings come from config.sh.
 # ======================================================================
 
 set -euo pipefail
@@ -59,7 +59,7 @@ NC='\033[0m'
 # Setup
 # ======================================================================
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CONFIG_FILE="${SCRIPT_DIR}/pipeline_config.cfg"
+CONFIG_FILE="${SCRIPT_DIR}/config.sh"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo -e "${RED}ERROR: Config file not found: $CONFIG_FILE${NC}"
@@ -295,7 +295,7 @@ if [[ $found_files -eq 0 ]]; then
     echo -e "${RED}No ROI files found matching *${ROI_SOURCE_LABEL}_{left,right}.nii* in:${NC}"
     echo "  $ROI_SOURCE_DIR"
     echo ""
-    echo "Check ROI_SOURCE_DIR and ROI_SOURCE_LABEL in pipeline_config.cfg"
+    echo "Check ROI_SOURCE_DIR and ROI_SOURCE_LABEL in config.sh"
     exit 1
 fi
 

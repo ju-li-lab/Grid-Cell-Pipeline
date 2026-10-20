@@ -3,7 +3,7 @@
 #  SPM Preprocessing — SLURM Array Job (also runnable directly)
 # =============================================================================
 #  Runs one preprocessing job per subject-session. All settings are read from
-#  pipeline_config.cfg — no editing needed here.
+#  config.sh — no editing needed here.
 #
 #  Usage (SLURM array, one task per line of subses_list.txt):
 #    N=$(wc -l < subses_list.txt)
@@ -14,11 +14,11 @@
 #    bash spm_preproc_array.sbatch --sub sub-01s13 --ses ses-01 --stages smooth
 #
 #  Or use submit_preproc.sh / run_pipeline.sh, which fill in the SLURM resource
-#  flags from pipeline_config.cfg for you.
+#  flags from config.sh for you.
 #
 #  Output goes to <DERIV_ROOT>/<DERIV_PREPROC>/<sub>/<ses>/, never into
 #  BIDS_ROOT. A stage list that starts the preprocessing from its beginning
-#  clears that directory first; see DERIV_RESET in pipeline_config.cfg.
+#  clears that directory first; see DERIV_RESET in config.sh.
 #
 #  Options:
 #    --stages LIST   Preprocessing stages to run (default: PREPROC_STAGES from
@@ -28,7 +28,7 @@
 #    --ses SES       Session that goes with --sub.
 #    --list FILE     Subject-session list to index with SLURM_ARRAY_TASK_ID
 #                    (default: <script dir>/subses_list.txt).
-#    --config FILE   Config file (default: <script dir>/pipeline_config.cfg).
+#    --config FILE   Config file (default: <script dir>/config.sh).
 #    --task-id N     Line of the list to process (default: SLURM_ARRAY_TASK_ID).
 #
 #  Environment overrides (used when submitting via --export):
@@ -47,7 +47,7 @@ set -euo pipefail
 # Falls back to auto-detect for manual runs (won't work inside SLURM spool).
 BOOT_DIR="${PIPELINE_SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
-CONFIG_FILE="${PIPELINE_CONFIG:-${BOOT_DIR}/pipeline_config.cfg}"
+CONFIG_FILE="${PIPELINE_CONFIG:-${BOOT_DIR}/config.sh}"
 LIST="${SUBSES_LIST:-}"
 STAGES="${PREPROC_STAGES:-}"
 TASK_ID="${SLURM_ARRAY_TASK_ID:-}"
@@ -75,11 +75,11 @@ done
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
     echo "ERROR: Config file not found: $CONFIG_FILE"
-    echo "       Make sure pipeline_config.cfg is in the same folder as this script."
+    echo "       Make sure config.sh is in the same folder as this script."
     exit 1
 fi
 
-# Sourcing sets SCRIPT_DIR (and PREPROC_STAGES) from the config file.
+# Sourcing sets PIPELINE_DIR (and PREPROC_STAGES) from the config file.
 source "$CONFIG_FILE"
 
 # Derivative path helpers, for the banner below. The MATLAB side resolves the
@@ -90,13 +90,13 @@ if [[ -f "${BOOT_DIR}/bids_common.sh" ]]; then
 fi
 
 # ---- Validate required config variables ----
-: "${BIDS_ROOT:?ERROR: BIDS_ROOT not set in pipeline_config.cfg}"
-: "${SCRIPT_DIR:?ERROR: SCRIPT_DIR not set in pipeline_config.cfg}"
+: "${BIDS_ROOT:?ERROR: BIDS_ROOT not set in config.sh}"
+: "${PIPELINE_DIR:?ERROR: PIPELINE_DIR not set in config.sh}"
 : "${MATLAB_MODULE:=matlab}"
 
 # Subject list: --list / SUBSES_LIST wins, otherwise the one next to the scripts.
 if [[ -z "$LIST" ]]; then
-    LIST="${SCRIPT_DIR}/subses_list.txt"
+    LIST="${PIPELINE_DIR}/subses_list.txt"
 fi
 
 # Stage list: --stages wins, then the PREPROC_STAGES environment variable, then
@@ -107,7 +107,7 @@ fi
 STAGES="${STAGES// /}"
 
 # ---- Create logs directory ----
-mkdir -p "${SCRIPT_DIR}/logs"
+mkdir -p "${PIPELINE_DIR}/logs"
 
 # ---- Determine which subject-session to process ----
 if [[ -n "$SUB" || -n "$SES" ]]; then
@@ -181,7 +181,7 @@ fi
 # Pass the config file path so MATLAB reads all settings from it, and the stage
 # list so it knows which parts of the preprocessing to execute.
 matlab -nodisplay -nosplash -r "\
-    addpath('${SCRIPT_DIR}'); \
+    addpath('${PIPELINE_DIR}'); \
     try, \
         run_spm_preproc('${BIDS_ROOT}', '${SUB}', '${SES}', '${CONFIG_FILE}', '${STAGES}'); \
     catch ME, \
