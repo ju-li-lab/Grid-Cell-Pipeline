@@ -3,8 +3,8 @@
 #  SPM Preprocessing — standalone stage submitter
 # =============================================================================
 #  Runs the SPM preprocessing (or just some of its stages) without going
-#  through the interactive menu in run_pipeline.sh. SLURM resources, paths and
-#  defaults all come from pipeline_config.cfg.
+#  on its own, outside run_all.sh. SLURM resources, paths and
+#  defaults all come from config.sh.
 #
 #  Common uses:
 #    # everything, whole subject list (same as menu option 2)
@@ -32,7 +32,7 @@
 #                    Requires --sub/--ses.
 #    --array RANGE   SLURM array range (default: 1-<lines in the subject list>).
 #    --list FILE     Subject-session list (default: <script dir>/subses_list.txt).
-#    --config FILE   Config file (default: <script dir>/pipeline_config.cfg).
+#    --config FILE   Config file (default: <script dir>/config.sh).
 #    --dependency D  SLURM dependency spec, e.g. afterok:12345.
 #    --keep-deriv    Do not clear the preprocessing derivatives first.
 #    --dry-run       Print the command that would run, then stop.
@@ -54,10 +54,11 @@
 set -euo pipefail
 
 # Where this script and its siblings live. Kept separate from the config's
-# SCRIPT_DIR, which sourcing the config below overwrites.
+# SCRIPT_DIR. (The config calls its own copy PIPELINE_DIR, so sourcing it
+# no longer silently overwrites ours.)
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-CONFIG_FILE="${SELF_DIR}/pipeline_config.cfg"
+CONFIG_FILE="${SELF_DIR}/config.sh"
 STAGES=""
 SUB=""
 SES=""
@@ -99,18 +100,19 @@ fi
 source "$CONFIG_FILE"
 source "${SELF_DIR}/bids_common.sh"
 
-: "${BIDS_ROOT:?ERROR: BIDS_ROOT not set in pipeline_config.cfg}"
+: "${BIDS_ROOT:?ERROR: BIDS_ROOT not set in config.sh}"
 
-SBATCH_SCRIPT="${SELF_DIR}/spm_preproc_array.sbatch"
+SBATCH_SCRIPT="${SELF_DIR}/01_preprocess.sbatch"
 if [[ ! -f "$SBATCH_SCRIPT" ]]; then
-    echo "ERROR: spm_preproc_array.sbatch not found in ${SELF_DIR}" >&2
+    echo "ERROR: 01_preprocess.sbatch not found in ${SELF_DIR}" >&2
     exit 1
 fi
 
-# Sourcing the config set SCRIPT_DIR to the pipeline's script directory on the
-# cluster — that is where subses_list.txt lives. Fall back to this script's own
+# The config sets PIPELINE_DIR to the pipeline's script directory on the
+# cluster — that is where subses_list.txt lives. Fall back to our own
+# location when running from a checkout that has not set it. Fall back to this script's own
 # directory when the config does not set it.
-LIST_DIR="${SCRIPT_DIR:-$SELF_DIR}"
+LIST_DIR="${PIPELINE_DIR:-$SELF_DIR}"
 
 [[ -z "$STAGES" ]] && STAGES="${PREPROC_STAGES:-all}"
 STAGES="${STAGES// /}"
@@ -200,7 +202,7 @@ else
     [[ -z "$LIST" ]] && LIST="${LIST_DIR}/subses_list.txt"
     if [[ ! -f "$LIST" ]]; then
         echo "ERROR: Subject list not found: $LIST" >&2
-        echo "       Run step0_make_subses_list.sh first, or pass --sub/--ses." >&2
+        echo "       Run 00_list_subjects.sh first, or pass --sub/--ses." >&2
         exit 1
     fi
     n_jobs=$(grep -cve '^[[:space:]]*$' "$LIST")

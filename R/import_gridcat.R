@@ -20,7 +20,7 @@
 # ============================================================================
 
 # >>> 1. Which directory to import (one GLM output variant at a time).
-DATA_DIR <- "/Volumes/jusb/GLM_output_6f_t5_am_keep1_avg_1_faster"
+DATA_DIR <- "/Users/juli/Desktop/results_noavg/"
 
 # >>> 2. Subject-level info (group, age, ...).
 #     A CSV with one row per subject. If it does not exist yet, the script
