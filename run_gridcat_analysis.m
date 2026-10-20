@@ -19,7 +19,7 @@ function run_gridcat_analysis(cfgFile, subjectListFile)
 % Everything else should work without changes.
 %
 % HOW TO RUN (on the HPC via SLURM):
-%   Use the accompanying run_gridcat.sh script, or manually:
+%   Use the accompanying 03_gridcat.sh script, or manually:
 %     sbatch --time=08:00:00 --mem=32G --cpus-per-task=8 \
 %            --wrap="module load matlab/R2024b; matlab -nodisplay -r run_gridcat_analysis"
 

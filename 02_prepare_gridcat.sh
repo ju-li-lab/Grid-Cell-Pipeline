@@ -15,9 +15,9 @@
 #  All settings are read from config.sh — no editing needed here.
 #
 #  Usage:
-#    sbatch run_prep.sh
+#    sbatch 02_prepare_gridcat.sh
 #
-#  Or simply use run_pipeline.sh, which handles this for you.
+#  Or use run_all.sh, which queues this after the preprocessing.
 # =============================================================================
 
 # --- SLURM settings ---
@@ -29,7 +29,7 @@
 set -euo pipefail
 
 # ---- Resolve script directory ----
-# PIPELINE_SCRIPT_DIR is passed via --export when submitted from run_pipeline.sh.
+# PIPELINE_SCRIPT_DIR is passed via --export by run_all.sh.
 # Falls back to auto-detect for manual runs (won't work inside SLURM spool).
 SCRIPT_DIR="${PIPELINE_SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 CONFIG_FILE="${SCRIPT_DIR}/config.sh"

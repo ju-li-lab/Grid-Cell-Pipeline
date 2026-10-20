@@ -285,7 +285,7 @@ if [[ -n "$SUB_ARG" ]]; then
 else
     if [[ ! -f "$LIST" ]]; then
         err "Subject list not found: $LIST"
-        printf "       Run step0_make_subses_list.sh first, or pass --sub/--ses.\n" >&2
+        printf "       Run 00_list_subjects.sh first, or pass --sub/--ses.\n" >&2
         exit 1
     fi
     while read -r s ss _rest; do

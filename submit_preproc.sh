@@ -3,7 +3,7 @@
 #  SPM Preprocessing — standalone stage submitter
 # =============================================================================
 #  Runs the SPM preprocessing (or just some of its stages) without going
-#  through the interactive menu in run_pipeline.sh. SLURM resources, paths and
+#  on its own, outside run_all.sh. SLURM resources, paths and
 #  defaults all come from config.sh.
 #
 #  Common uses:
@@ -102,9 +102,9 @@ source "${SELF_DIR}/bids_common.sh"
 
 : "${BIDS_ROOT:?ERROR: BIDS_ROOT not set in config.sh}"
 
-SBATCH_SCRIPT="${SELF_DIR}/spm_preproc_array.sbatch"
+SBATCH_SCRIPT="${SELF_DIR}/01_preprocess.sbatch"
 if [[ ! -f "$SBATCH_SCRIPT" ]]; then
-    echo "ERROR: spm_preproc_array.sbatch not found in ${SELF_DIR}" >&2
+    echo "ERROR: 01_preprocess.sbatch not found in ${SELF_DIR}" >&2
     exit 1
 fi
 
@@ -202,7 +202,7 @@ else
     [[ -z "$LIST" ]] && LIST="${LIST_DIR}/subses_list.txt"
     if [[ ! -f "$LIST" ]]; then
         echo "ERROR: Subject list not found: $LIST" >&2
-        echo "       Run step0_make_subses_list.sh first, or pass --sub/--ses." >&2
+        echo "       Run 00_list_subjects.sh first, or pass --sub/--ses." >&2
         exit 1
     fi
     n_jobs=$(grep -cve '^[[:space:]]*$' "$LIST")

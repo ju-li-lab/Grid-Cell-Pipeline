@@ -7,13 +7,13 @@
 #
 #  Usage (SLURM array, one task per line of subses_list.txt):
 #    N=$(wc -l < subses_list.txt)
-#    sbatch --array=1-"$N" spm_preproc_array.sbatch
-#    sbatch --array=1-"$N" spm_preproc_array.sbatch --stages realign,coreg,smooth
+#    sbatch --array=1-"$N" 01_preprocess.sbatch
+#    sbatch --array=1-"$N" 01_preprocess.sbatch --stages realign,coreg,smooth
 #
 #  Usage (one subject, right here, no SLURM):
-#    bash spm_preproc_array.sbatch --sub sub-01s13 --ses ses-01 --stages smooth
+#    bash 01_preprocess.sbatch --sub sub-01s13 --ses ses-01 --stages smooth
 #
-#  Or use submit_preproc.sh / run_pipeline.sh, which fill in the SLURM resource
+#  Or use submit_preproc.sh / run_all.sh, which fill in the SLURM resource
 #  flags from config.sh for you.
 #
 #  Output goes to <DERIV_ROOT>/<DERIV_PREPROC>/<sub>/<ses>/, never into
@@ -35,7 +35,7 @@
 #    PIPELINE_SCRIPT_DIR, PIPELINE_CONFIG, PREPROC_STAGES, SUBSES_LIST
 # =============================================================================
 
-# --- SLURM defaults (overridden at submission via run_pipeline.sh) ---
+# --- SLURM defaults (overridden at submission time) ---
 #SBATCH --job-name=spm_preproc
 #SBATCH --output=logs/%x_%A_%a.out
 #SBATCH --error=logs/%x_%A_%a.err
@@ -43,7 +43,7 @@
 set -euo pipefail
 
 # ---- Locate the config file ----
-# PIPELINE_SCRIPT_DIR is passed via --export when submitted from run_pipeline.sh.
+# PIPELINE_SCRIPT_DIR is passed via --export by submit_preproc.sh / run_all.sh.
 # Falls back to auto-detect for manual runs (won't work inside SLURM spool).
 BOOT_DIR="${PIPELINE_SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
 
@@ -119,7 +119,7 @@ if [[ -n "$SUB" || -n "$SES" ]]; then
 else
     if [[ ! -f "$LIST" ]]; then
         echo "ERROR: Subject list not found: $LIST"
-        echo "       Run step0_make_subses_list.sh first, or pass --sub/--ses."
+        echo "       Run 00_list_subjects.sh first, or pass --sub/--ses."
         exit 1
     fi
 

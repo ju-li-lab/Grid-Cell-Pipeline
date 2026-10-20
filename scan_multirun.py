@@ -450,7 +450,7 @@ def summarise(rows, counts, split_sessions, unmatched, args):
     print('4. Point RUN_SELECTION_FILE in pipeline_config.cfg at this file.')
     print('')
     print('Re-running this scanner keeps the choices you have already made')
-    print('(--keep-existing, which run_pipeline.sh passes by default).')
+    print('(--keep-existing, which scan_multirun.sh passes by default).')
 
 
 if __name__ == '__main__':

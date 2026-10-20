@@ -3,8 +3,8 @@
 #  GridCAT GLM Analysis — dual-mode launcher + SLURM job
 # =============================================================================
 #  Preferred usage:
-#    bash run_gridcat.sh                       — submit the job (snapshots config)
-#    sbatch run_gridcat.sh                     — also works; SLURM runs the
+#    bash 03_gridcat.sh                       — submit the job (snapshots config)
+#    sbatch 03_gridcat.sh                     — also works; SLURM runs the
 #                                                 submitter, which then submits
 #                                                 the real analysis job.
 #
@@ -97,7 +97,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         GRES_FLAG=(--gres="tmp:${GRIDCAT_LOCAL_TMP}")
     fi
 
-    # Optional SLURM dependency (e.g. afterok:1234) so run_pipeline.sh can chain
+    # Optional SLURM dependency (e.g. afterok:1234) so run_all.sh can chain
     # this GLM job after the prep job in a single "Run ALL steps" submission.
     DEP_FLAG=()
     if [[ -n "${GRIDCAT_DEPENDENCY:-}" ]]; then
@@ -119,7 +119,7 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
         "${DEP_FLAG[@]}" \
         "${MAIL_FLAG[@]}" \
         "${GRES_FLAG[@]}" \
-        "${ORIG_SCRIPT_DIR}/run_gridcat.sh"
+        "${ORIG_SCRIPT_DIR}/03_gridcat.sh"
 fi
 
 # =============================================================================
@@ -138,7 +138,7 @@ fi
 if [[ -z "${PIPELINE_SCRIPT_DIR:-}" ]]; then
     echo "WARNING: PIPELINE_SCRIPT_DIR not set — using live config at $CONFIG_FILE."
     echo "         Editing that file while this job runs may corrupt the run."
-    echo "         Prefer: bash run_gridcat.sh   (handles snapshotting automatically)."
+    echo "         Prefer: bash 03_gridcat.sh   (handles snapshotting automatically)."
 fi
 
 # Fall back to ORIG_SCRIPT_DIR for logging directory (shared across runs).
