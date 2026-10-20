@@ -1824,16 +1824,31 @@ switch peDir
 end
 voxSize_PE = abs(Vepi.mat(peDim, peDim));
 
-% Convert Hz fieldmap to VDM (voxel shifts in the PE direction)
-% VDM = field_Hz * totalReadoutTime_s (gives shift in voxels),
-% then multiply by voxel size to get mm displacement
+% Convert the topup field (Hz) to a voxel displacement map.
+%
+% SPM's VDM is in VOXELS: spm_uw_apply shifts each voxel by the VDM value
+% along the phase-encode direction, in voxel units. field_Hz * readout_s is
+% already that number, so no voxel-size factor belongs here. An earlier
+% version multiplied by voxSize_PE, which over-corrected the distortion by
+% the PE voxel size (2-3x for a typical EPI).
 readout_sec = CFG.TOPUP_READOUT_SEC;
-vdmData = fieldData * readout_sec * voxSize_PE;
+vdmData = fieldData * readout_sec;
 
-% If PE direction is negative, flip the sign
+% If PE direction is negative, flip the sign.
+%
+% UNVERIFIED: topup's --fout sign is already defined relative to the first
+% row of acqparams.txt, so this flip may double-count. If the unwarped
+% images come out MORE distorted than the originals rather than less, try
+% removing this branch - that is what a sign error looks like.
 if endsWith(peDir, '-')
     vdmData = -vdmData;
 end
+
+% Report the peak shift, so an implausible VDM is visible in the job log.
+% A sane EPI distortion is a few voxels; tens of voxels means the readout
+% time or the field units are wrong.
+fprintf('  VDM task-%s: peak shift %.2f voxels (= %.2f mm at %.2f mm PE voxel)\n', ...
+    taskLabel, max(abs(vdmData(:))), max(abs(vdmData(:))) * voxSize_PE, voxSize_PE);
 
 % Write VDM using field header (same geometry)
 vdm_out = fullfile(funcDir, sprintf('vdm_task-%s.nii', taskLabel));
