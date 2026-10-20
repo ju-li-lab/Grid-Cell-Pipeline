@@ -15,7 +15,7 @@ library(ggplot2)
 
 # ---- pick what to look at --------------------------------------------------
 
-d <- grid_runs %>% filter(run == "1", hemisphere == "bilat")
+d <- grid_runs %>% filter(run == "avg", hemisphere == "bilat")
 
 # other slices to try — swap one of these in:
 # d <- grid_runs %>% filter(run == "2",   hemisphere == "left")
@@ -44,7 +44,7 @@ print(p1)
 # ---- NaN voxels per subject ------------------------------------------------
 # how much of the mask was actually usable
 
-p2 <- ggplot(d, aes(x = subject_id, y = 100 * n_nan_voxels / n_voxels, fill = factor(session))) +
+p2 <- ggplot(d, aes(x = subject_id, y = n_nan_voxels, fill = factor(session))) +
   geom_col(position = "dodge") +
   labs(title = "NaN voxels in the mask — run 1, left ErC",
        x = NULL, y = NULL, fill = "session") +
@@ -56,7 +56,7 @@ print(p2)
 # ---- do the two go together? -----------------------------------------------
 # if subjects with more dropout also have bigger contrasts, that's a worry
 
-p3 <- ggplot(d, aes(x = 100 * n_nan_voxels / n_voxels, y = contrast)) +
+p3 <- ggplot(d, aes(x = n_nan_voxels, y = contrast)) +
   geom_point(size = 2) +
   geom_smooth(method = "lm", formula = y ~ x, se = FALSE) +
   geom_hline(yintercept = 0, linetype = "dashed") +
