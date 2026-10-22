@@ -17,13 +17,13 @@
 # -----------------------------------------------------------------------------
 
 # BIDS data. Read only — the pipeline never writes here.
-BIDS_ROOT=/sc-projects/sc-proj-cc02-brainspace/myspace/julius/BRACE_GC_testing/v2_BRACE_ashs/bids
+BIDS_ROOT=/sc-projects/sc-proj-cc02-brainspace/myspace/julius/SOLIS_GC/bids
 
 # Where output goes. Created if missing.
-OUTPUT_ROOT=/sc-projects/sc-proj-cc02-brainspace/myspace/julius/BRACE_GC_testing/v2_BRACE_ashs/workDir
+OUTPUT_ROOT=/sc-projects/sc-proj-cc02-brainspace/myspace/julius/SOLIS_GC/workDir
 
 # This script directory on the cluster.
-PIPELINE_DIR=/sc-projects/sc-proj-cc02-brainspace/myspace/julius/BRACE_GC_testing/v2_BRACE_ashs/scripts_v2
+PIPELINE_DIR=/sc-projects/sc-proj-cc02-brainspace/myspace/julius/SOLIS_GC/Grid-Cell-Pipeline
 
 SPM_DIR=/sc-projects/sc-proj-cc02-brainspace/software/matlab/spm25
 GRIDCAT_DIR=/sc-projects/sc-proj-cc02-brainspace/myspace/julius/sirius_wip/GridCAT
@@ -72,7 +72,7 @@ RUN_VARIANT=6f_t5_am_keep1_avg_1
 # -----------------------------------------------------------------------------
 
 # Task labels, comma-separated, matching task-<LABEL> in the BIDS filenames.
-TASKS=run1,run2
+TASKS=1,2
 
 # How to correct distortion:
 #   realign_unwarp   GRE fieldmap: needs phasediff + magnitude1 in fmap/.
@@ -81,7 +81,7 @@ TASKS=run1,run2
 #   precalc_fieldmap ready-made B0 fieldmap, built by tools/make_fieldmaps.sh
 #                    for sessions that have a phasediff but NO magnitude.
 #   realign_only     motion correction only, no distortion correction.
-PREPROC_MODE=topup
+PREPROC_MODE=realign_unwarp
 
 # Which preprocessing stages to run, comma-separated. Each reads what it
 # needs from disk, so you can stop after any of them, check or replace the
@@ -114,7 +114,7 @@ DO_COREG_ROIS=1
 #   EXCLUDE_SESSIONS=ses-03,ses-05
 INCLUDE_SUBJECTS=
 INCLUDE_SESSIONS=
-EXCLUDE_SUBJECTS=
+EXCLUDE_SUBJECTS=sub-07s17,sub-06s17
 EXCLUDE_SESSIONS=
 
 # Skip subject-sessions that have no ROI masks in anat/ (saves time).
@@ -129,8 +129,8 @@ EXCLUDE_TASKS=rest,reverse,mean
 # -----------------------------------------------------------------------------
 
 # Filenames the pipeline looks for in anat/. Extra BIDS entities tolerated.
-ROI_PATTERN_LEFT=_hemi-left_label-ErC_mask.nii
-ROI_PATTERN_RIGHT=_hemi-right_label-ErC_mask.nii
+ROI_PATTERN_LEFT=_hemi-left_label-lpmErC_mask.nii
+ROI_PATTERN_RIGHT=_hemi-right_label-rpmErC_mask.nii
 
 # The anatomical label in those filenames. Everything downstream — the
 # GridCAT prep and the GLM — filters on this, so it must match the patterns.
@@ -158,7 +158,7 @@ ROI_MODE=both
 
 # Written by: bash tools/scan_multirun.sh
 # Empty = rely on acquisition-time matching alone.
-RUN_SELECTION_FILE=/sc-projects/sc-proj-cc02-brainspace/myspace/julius/BRACE_GC_testing/v2_BRACE_ashs/scripts_v2/run_selection.tsv
+RUN_SELECTION_FILE=/sc-projects/sc-proj-cc02-brainspace/myspace/julius/SOLIS_GC/preproc_testing/Grid-Cell-Pipeline/run_selection.tsv
 
 # How far apart two scans may be acquired and still count as the same visit
 # to the scanner, in minutes.
@@ -269,7 +269,7 @@ SLURM_PARTITION=compute
 # Job notification email. Empty disables it. When set you get two mails per
 # full run_all.sh chain: one when all preprocessing array tasks finish, one
 # when GridCAT finishes. FAIL notifications are sent too.
-NOTIFY_EMAIL=
+NOTIFY_EMAIL=julius.schaut@charite.de
 
 MATLAB_MODULE=matlab
 
