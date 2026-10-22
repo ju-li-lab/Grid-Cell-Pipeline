@@ -16,7 +16,7 @@
 # This directory should contain sub-XX folders.
 #
 # Example:  /sc-projects/sc-proj-cc02-brainspace/sirius_wip/ashs_output
-ASHS_DIR="/charite-store-f/f-cc04-stahn_lab/projects/BRAVITY/Data/BRACE/mri/bids/derivatives/ashs/abc_prisma"
+ASHS_DIR="/charite-store-f/f-cc04-stahn_lab/projects/SOLIS/Data/mri/bids/derivatives/ashs/ashs_oap_atlas"
 
 # ------------------------------------------------------------------------------
 # 2) WHICH SEGMENTATION TYPE to use?
@@ -53,7 +53,7 @@ SEG_TYPE="corr_usegray"
 #   14 = CS (Collateral Sulcus)
 #
 # Example: extract ERC only
-LABELS_TO_EXTRACT="9"
+LABELS_TO_EXTRACT="3 4"
 #
 # Example: extract ERC + PHC + SUB
 # LABELS_TO_EXTRACT="9 12 8"
@@ -64,7 +64,7 @@ LABELS_TO_EXTRACT="9"
 # Friendly names for the labels (must match order of LABELS_TO_EXTRACT).
 # These are used in output filenames. Use simple names, no spaces.
 # If left empty, the script uses the default names from the atlas.
-LABEL_NAMES="ErC"
+LABEL_NAMES="lpmErC rpmErC"
 # Example: LABEL_NAMES="ERC PHC SUB"
 
 # ------------------------------------------------------------------------------
@@ -94,7 +94,7 @@ FLAT_OUTPUT_DIR="/sc-projects/sc-proj-cc02-brainspace/myspace/julius/BRACE_GC_te
 # For OUTPUT_MODE="bids":
 # Path to the BIDS dataset root (must already contain sub-XX/ses-YY/anat/).
 # Masks will be placed into the matching sub/ses/anat folder.
-BIDS_OUTPUT_DIR="/sc-projects/sc-proj-cc02-brainspace/myspace/julius/BRACE_GC_testing/BRACE/bids"
+BIDS_OUTPUT_DIR="/sc-projects/sc-proj-cc02-brainspace/myspace/julius/SOLIS_GC/bids"
 
 # ------------------------------------------------------------------------------
 # 6) MULTIPLE RUNS — how to handle them
