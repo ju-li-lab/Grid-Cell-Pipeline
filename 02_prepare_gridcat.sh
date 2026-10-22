@@ -15,12 +15,17 @@
 #  All settings are read from config.sh — no editing needed here.
 #
 #  Usage:
-#    sbatch 02_prepare_gridcat.sh
+#    bash 02_prepare_gridcat.sh      submit the job (reads SLURM resources
+#                                    for it from config.sh)
+#    sbatch 02_prepare_gridcat.sh    also works
+#    bash 02_prepare_gridcat.sh --local   run it here, in the foreground
 #
 #  Or use run_all.sh, which queues this after the preprocessing.
+#
+#  Set STAGE_DEPENDENCY=afterok:<jobid> to make the submitted job wait.
 # =============================================================================
 
-# --- SLURM settings ---
+# --- SLURM settings (used when this script runs AS the job) ---
 #SBATCH --job-name=gridcat_prep
 #SBATCH --partition=compute
 #SBATCH --output=logs/gridcat_prep_%j.out
@@ -28,10 +33,59 @@
 
 set -euo pipefail
 
-# ---- Resolve script directory ----
-# PIPELINE_SCRIPT_DIR is passed via --export by run_all.sh.
-# Falls back to auto-detect for manual runs (won't work inside SLURM spool).
-SCRIPT_DIR="${PIPELINE_SCRIPT_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}"
+ORIG_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+RUN_LOCAL=false
+[[ "${1:-}" == "--local" ]] && RUN_LOCAL=true
+
+# =============================================================================
+#  SUBMITTER MODE — called by hand, not yet inside a SLURM job
+# =============================================================================
+#  Without this, "bash 02_prepare_gridcat.sh" would run the whole preparation
+#  on the login node and submit nothing, while "bash 03_gridcat.sh" submits.
+#  Two neighbouring stages behaving differently is a trap, so both submit.
+if [[ -z "${SLURM_JOB_ID:-}" ]] && [[ "$RUN_LOCAL" != "true" ]]; then
+    CONFIG_FILE="${ORIG_SCRIPT_DIR}/config.sh"
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "ERROR: Config file not found: $CONFIG_FILE" >&2
+        exit 1
+    fi
+    # shellcheck disable=SC1090
+    source "$CONFIG_FILE"
+
+    : "${SLURM_PARTITION:=compute}"
+    : "${PREP_TIME:=01:00:00}"
+    : "${PREP_CPUS:=10}"
+    : "${PREP_MEM:=40G}"
+
+    if ! command -v sbatch >/dev/null 2>&1; then
+        echo "ERROR: sbatch not found — this does not look like a SLURM cluster." >&2
+        echo "       To run the preparation here instead:" >&2
+        echo "         bash 02_prepare_gridcat.sh --local" >&2
+        exit 1
+    fi
+
+    DEP_FLAG=()
+    [[ -n "${STAGE_DEPENDENCY:-}" ]] && DEP_FLAG=(--dependency="${STAGE_DEPENDENCY}")
+
+    mkdir -p "${ORIG_SCRIPT_DIR}/logs"
+    exec sbatch \
+        --export=ALL,PIPELINE_SCRIPT_DIR="${ORIG_SCRIPT_DIR}" \
+        --partition="${SLURM_PARTITION}" \
+        --time="${PREP_TIME}" \
+        --cpus-per-task="${PREP_CPUS}" \
+        --mem="${PREP_MEM}" \
+        ${DEP_FLAG[@]+"${DEP_FLAG[@]}"} \
+        "${ORIG_SCRIPT_DIR}/02_prepare_gridcat.sh"
+fi
+
+# =============================================================================
+#  EXECUTION MODE — inside the SLURM job, or --local
+# =============================================================================
+
+# PIPELINE_SCRIPT_DIR is passed via --export by the submitter above.
+# Falls back to auto-detect (won't work from inside the SLURM spool).
+SCRIPT_DIR="${PIPELINE_SCRIPT_DIR:-$ORIG_SCRIPT_DIR}"
 CONFIG_FILE="${SCRIPT_DIR}/config.sh"
 
 if [[ ! -f "$CONFIG_FILE" ]]; then
@@ -51,7 +105,7 @@ source "${SCRIPT_DIR}/bids_common.sh"
 PREPROC_ROOT="$(deriv_preproc)"
 if [[ ! -d "$PREPROC_ROOT" ]]; then
     echo "ERROR: no preprocessing derivatives at: $PREPROC_ROOT"
-    echo "       Run the preprocessing first (menu option 2, or submit_preproc.sh)."
+    echo "       Run the preprocessing first: bash submit_preproc.sh"
     exit 1
 fi
 
@@ -67,8 +121,8 @@ echo "============================================"
 echo ""
 
 # ---- Load MATLAB ----
-module purge
-module load "${MATLAB_MODULE}"
+load_modules "${MATLAB_MODULE}"
+require_command matlab "running prepare_gridcat_directory"
 
 # ---- Determine functional file suffix based on preprocessing mode ----
 # In topup+applytopup mode, SPM writes u*_bold_dc.nii instead of u*_bold.nii

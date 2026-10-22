@@ -155,8 +155,7 @@ echo ""
 
 # ---- Load modules ----
 if command -v module >/dev/null 2>&1; then
-    module purge
-    module load "${MATLAB_MODULE}"
+    load_modules "${MATLAB_MODULE}"
 
     # FSL is needed by topup estimation, by converting a topup field to a VDM,
     # and by applytopup during realignment. Only coreg and smooth never call it,
@@ -171,11 +170,8 @@ if command -v module >/dev/null 2>&1; then
     fi
 else
     echo "NOTE: no 'module' command available — using matlab/fsl from PATH."
-    command -v matlab >/dev/null 2>&1 || {
-        echo "ERROR: matlab not found on PATH and no module system available."
-        exit 1
-    }
 fi
+require_command matlab "running run_spm_preproc"
 
 # ---- Run preprocessing ----
 # Pass the config file path so MATLAB reads all settings from it, and the stage

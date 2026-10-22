@@ -68,6 +68,43 @@ deriv_preproc()    { deriv_dataset "${DERIV_PREPROC:-spm-preproc}"; }
 deriv_rois()       { deriv_dataset "${DERIV_ROIS:-rois}"; }
 deriv_fieldmaps()  { deriv_dataset "${DERIV_FIELDMAPS:-fieldmaps}"; }
 
+# ---------------------------------------------------------------------------
+#  Loading environment modules
+# ---------------------------------------------------------------------------
+#  `module` is usually a shell FUNCTION defined by the login profile, not a
+#  real command, so it does not exist in a non-interactive `bash script.sh`.
+#  Calling it unguarded under `set -e` kills the script at exit 127 before it
+#  does any work - which is exactly what used to happen when you ran
+#  02_prepare_gridcat.sh or 03_gridcat.sh by hand.
+#
+#  load_modules <name>...  loads each module if the module system is there,
+#                          and otherwise says so and carries on with whatever
+#                          is already on PATH.
+load_modules() {
+    if ! command -v module >/dev/null 2>&1; then
+        echo "NOTE: no 'module' command available - using what is on PATH."
+        return 0
+    fi
+    module purge
+    local m
+    for m in "$@"; do
+        [[ -n "$m" ]] || continue
+        echo "Loading module: $m"
+        module load "$m"
+    done
+}
+
+# require_command <name> <what it is for>
+#   Fails with a useful message instead of "command not found" 40 lines later.
+require_command() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "ERROR: '$1' not found on PATH, and no module system provided it." >&2
+        echo "       Needed for: $2" >&2
+        echo "       On the cluster this normally comes from MATLAB_MODULE in config.sh." >&2
+        return 1
+    fi
+}
+
 # The prefix the preprocessed BOLD files actually carry, derived rather
 # than stored: SPM prepends RESLICE_PREFIX when it reslices, and
 # SMOOTH_PREFIX on top of that when smoothing runs. Keeping this as its

@@ -2,11 +2,13 @@
 # =============================================================================
 #  GridCAT GLM Analysis — dual-mode launcher + SLURM job
 # =============================================================================
-#  Preferred usage:
-#    bash 03_gridcat.sh                       — submit the job (snapshots config)
-#    sbatch 03_gridcat.sh                     — also works; SLURM runs the
-#                                                 submitter, which then submits
-#                                                 the real analysis job.
+#  Usage:
+#    bash 03_gridcat.sh            submit the job (snapshots the settings)
+#    sbatch 03_gridcat.sh          also works; SLURM runs the submitter, which
+#                                  then submits the real analysis job
+#    bash 03_gridcat.sh --local    run it here, in the foreground
+#
+#  Set STAGE_DEPENDENCY=afterok:<jobid> to make the submitted job wait.
 #
 #  On submission this script takes a timestamped snapshot of config.sh
 #  and subses_list.txt into runs/gridcat_<variant>_<timestamp>/ and tells SLURM
@@ -27,10 +29,13 @@ set -euo pipefail
 
 ORIG_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+RUN_LOCAL=false
+[[ "${1:-}" == "--local" ]] && RUN_LOCAL=true
+
 # =============================================================================
-#  SUBMITTER MODE — not yet inside a SLURM job
+#  SUBMITTER MODE — called by hand, not yet inside a SLURM job
 # =============================================================================
-if [[ -z "${SLURM_JOB_ID:-}" ]]; then
+if [[ -z "${SLURM_JOB_ID:-}" ]] && [[ "$RUN_LOCAL" != "true" ]]; then
     CONFIG_FILE="${ORIG_SCRIPT_DIR}/config.sh"
     if [[ ! -f "$CONFIG_FILE" ]]; then
         echo "ERROR: Config file not found: $CONFIG_FILE" >&2
@@ -101,10 +106,18 @@ if [[ -z "${SLURM_JOB_ID:-}" ]]; then
     fi
 
     # Optional SLURM dependency (e.g. afterok:1234) so run_all.sh can chain
+    # this after the prep job. Same variable name as stage 02.
     # this GLM job after the prep job in a single "Run ALL steps" submission.
+    if ! command -v sbatch >/dev/null 2>&1; then
+        echo "ERROR: sbatch not found — this does not look like a SLURM cluster." >&2
+        echo "       To run the analysis here instead:" >&2
+        echo "         bash 03_gridcat.sh --local" >&2
+        exit 1
+    fi
+
     DEP_FLAG=()
-    if [[ -n "${GRIDCAT_DEPENDENCY:-}" ]]; then
-        DEP_FLAG=(--dependency="${GRIDCAT_DEPENDENCY}")
+    if [[ -n "${STAGE_DEPENDENCY:-}" ]]; then
+        DEP_FLAG=(--dependency="${STAGE_DEPENDENCY}")
     fi
 
     # Email once when the GridCAT analysis finishes (or fails).
@@ -139,9 +152,13 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
 fi
 
 if [[ -z "${PIPELINE_SCRIPT_DIR:-}" ]]; then
-    echo "WARNING: PIPELINE_SCRIPT_DIR not set — using live config at $CONFIG_FILE."
-    echo "         Editing that file while this job runs may corrupt the run."
-    echo "         Prefer: bash 03_gridcat.sh   (handles snapshotting automatically)."
+    if [[ "$RUN_LOCAL" == "true" ]]; then
+        echo "Running locally against the live settings (no snapshot was taken)."
+    else
+        echo "WARNING: PIPELINE_SCRIPT_DIR not set — using live config at $CONFIG_FILE."
+        echo "         Editing that file while this job runs may corrupt the run."
+        echo "         Prefer: bash 03_gridcat.sh   (handles snapshotting automatically)."
+    fi
 fi
 
 # Fall back to ORIG_SCRIPT_DIR for logging directory (shared across runs).
@@ -149,6 +166,9 @@ LOG_DIR="${GRIDCAT_ORIG_SCRIPT_DIR:-$ORIG_SCRIPT_DIR}/logs"
 mkdir -p "${LOG_DIR}"
 
 source "$CONFIG_FILE"
+# load_modules / require_command live here
+# shellcheck disable=SC1091
+source "${GRIDCAT_ORIG_SCRIPT_DIR:-$ORIG_SCRIPT_DIR}/bids_common.sh"
 
 # ---- Validate required config variables ----
 : "${SPM_DIR:?ERROR: SPM_DIR not set in config.sh}"
@@ -184,8 +204,8 @@ echo "============================================"
 echo ""
 
 # ---- Load MATLAB ----
-module purge
-module load "${MATLAB_MODULE}"
+load_modules "${MATLAB_MODULE}"
+require_command matlab "running run_gridcat_analysis"
 
 # ---- Run GridCAT analysis ----
 # Pass config file and subject list so run_gridcat_analysis filters correctly.

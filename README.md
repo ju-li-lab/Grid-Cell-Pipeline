@@ -32,8 +32,28 @@ options independently:
 bash 00_list_subjects.sh                                   # rebuild the subject list
 bash submit_preproc.sh --stages smooth                     # re-smooth only
 bash submit_preproc.sh --sub sub-01s13 --ses ses-01 --local # one session, here, now
-sbatch 02_prepare_gridcat.sh
+bash 02_prepare_gridcat.sh
 bash 03_gridcat.sh
+```
+
+`00_list_subjects.sh` runs here and now — it only reads the BIDS directory. The
+three cluster stages behave alike: **`bash` submits** a job and prints its id,
+and `--local` runs it in the foreground instead, which is what you want when
+debugging:
+
+```bash
+bash submit_preproc.sh --sub sub-01s13 --ses ses-01 --local
+bash 02_prepare_gridcat.sh --local
+bash 03_gridcat.sh --local
+```
+
+`sbatch 0N_...` also works for stages 2 and 3; SLURM runs the submitter, which
+submits the real job.
+
+To make a submitted stage wait for another job:
+
+```bash
+STAGE_DEPENDENCY=afterok:12345 bash 02_prepare_gridcat.sh
 ```
 
 ---
@@ -289,3 +309,10 @@ under `C.fieldmap` in `spm_options.m` is inert; in `realign_unwarp` mode it is
 
 **Jobs.** `squeue -u $USER` to watch, `scancel <id>` to stop. SLURM logs land in
 `logs/`.
+
+**A stage printed its banner and then stopped.** `module` is usually a shell
+function from the login profile, not a real command, so it does not exist
+inside a non-interactive `bash script.sh`. Every stage now says
+`NOTE: no 'module' command available` and carries on with whatever is on PATH,
+then fails with a clear message if `matlab` is genuinely missing. If you see
+`module: command not found` you are on an older copy of these scripts.

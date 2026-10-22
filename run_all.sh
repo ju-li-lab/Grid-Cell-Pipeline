@@ -124,16 +124,13 @@ echo "Submitting preprocessing"
 preproc_id=$(bash "${SELF_DIR}/submit_preproc.sh" | tee /dev/stderr | job_id_from)
 [[ -n "$preproc_id" ]] || { echo "ERROR: preprocessing did not submit." >&2; exit 1; }
 
+# Each stage knows its own SLURM resources, so let it submit itself rather
+# than restating --time/--cpus/--mem here. STAGE_DEPENDENCY is how both
+# stages take the job they must wait for.
 echo
 echo "Submitting GridCAT preparation (waits ${CHAIN}:${preproc_id})"
-prep_id=$(sbatch \
-    --export=ALL,PIPELINE_SCRIPT_DIR="${SELF_DIR}" \
-    --partition="${SLURM_PARTITION}" \
-    --time="${PREP_TIME}" \
-    --cpus-per-task="${PREP_CPUS}" \
-    --mem="${PREP_MEM}" \
-    --dependency="${CHAIN}:${preproc_id}" \
-    "${SELF_DIR}/02_prepare_gridcat.sh" | tee /dev/stderr | job_id_from)
+prep_id=$(STAGE_DEPENDENCY="${CHAIN}:${preproc_id}" \
+    bash "${SELF_DIR}/02_prepare_gridcat.sh" | tee /dev/stderr | job_id_from)
 if [[ -z "$prep_id" ]]; then
     echo "ERROR: prep did not submit. Cancel the queued job with: scancel ${preproc_id}" >&2
     exit 1
@@ -141,7 +138,7 @@ fi
 
 echo
 echo "Submitting GridCAT analysis (waits ${CHAIN}:${prep_id})"
-gridcat_id=$(GRIDCAT_DEPENDENCY="${CHAIN}:${prep_id}" \
+gridcat_id=$(STAGE_DEPENDENCY="${CHAIN}:${prep_id}" \
     bash "${SELF_DIR}/03_gridcat.sh" | tee /dev/stderr | job_id_from)
 if [[ -z "$gridcat_id" ]]; then
     echo "ERROR: GridCAT did not submit. Cancel with: scancel ${preproc_id} ${prep_id}" >&2
