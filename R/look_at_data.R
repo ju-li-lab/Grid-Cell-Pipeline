@@ -44,10 +44,10 @@ print(p1)
 # ---- NaN voxels per subject ------------------------------------------------
 # how much of the mask was actually usable
 
-p2 <- ggplot(grid_runs, aes(x = subject_id, y = contrast, fill = factor(run_num))) +
+p2 <- ggplot(grid_runs, aes(x = subject_id, y = pct_nan, fill = factor(session))) +
   geom_col(position = "dodge") +
   labs(title = "Checkman",
-       x = NULL, y = NULL, fill = "contrast") +
+       x = NULL, y = NULL, fill = "session") +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 print(p2)

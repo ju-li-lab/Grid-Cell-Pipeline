@@ -289,6 +289,47 @@ open `matlab/steps/smooth_bold_files.m`; to change the topup→VDM conversion,
 
 ---
 
+## Checking a preprocessing trial
+
+Before committing a preprocessing run to GridCAT, measure how much of each ROI
+mask will actually carry a value in the GLM:
+
+```bash
+bash tools/check_roi_coverage.sh --trial sep4_fwhm5
+```
+
+It reproduces SPM's implicit mask — a voxel is kept only if it clears
+`maskingThreshold x global` in **every** scan, with the global computed per
+scan — and reports, per subject/session/hemisphere, how many mask voxels
+survive across a range of thresholds.
+
+Two columns decide what to do:
+
+- **`no_data`** — voxels with essentially no signal. These are dropout or a
+  misplaced mask. No threshold recovers them; the fix is the acquisition or
+  the coregistration.
+- **`n_<thr>`** — voxels that would carry a value at that threshold. Set
+  `C.GLM.maskingThreshold` in `spm_options.m` to the lowest threshold still on
+  the flat part of the curve.
+
+Every run appends to `roi_coverage.csv` with the `--trial` label as a column,
+so trials are directly comparable:
+
+```bash
+bash tools/check_roi_coverage.sh --trial sep15_fwhm1
+bash tools/check_roi_coverage.sh --trial sep4_fwhm5
+```
+
+```r
+cov <- readr::read_csv("roi_coverage.csv")
+cov |> dplyr::group_by(trial) |> dplyr::summarise(median(pct_0.80), median(pct_0.50))
+```
+
+Use `--sub sub-05s17` to check one subject while iterating, and `--deriv DIR`
+to point at a derivatives tree other than the one `config.sh` names.
+
+---
+
 ## Troubleshooting
 
 **Check what a run actually did.** Every output session carries
