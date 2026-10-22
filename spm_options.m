@@ -31,7 +31,7 @@ C = struct();
 %  Wrong values here are silently wrong results. Check them against the
 %  BIDS JSON sidecars in func/ and fmap/.
 
-C.TR = 2;                    % Repetition time, SECONDS. From the task JSON.
+C.TR = 2.06;                    % Repetition time, SECONDS. From the task JSON.
 
 % Echo times of the GRE fieldmap, MILLISECONDS.
 % fmap/*_phasediff.json -> EchoTime1 and EchoTime2 (BIDS stores seconds).
@@ -41,17 +41,16 @@ TE_LONG_MS  = 7.38;
 % Total EPI readout, MILLISECONDS. Used by the SPM FieldMap toolbox (tert).
 % func/*_bold.json -> TotalReadoutTime (seconds, so multiply by 1000).
 %
-% CHECK THIS: it disagrees with TOPUP_READOUT_SEC below by a factor of 1.56
-% (34.775 ms vs 54.09 ms). Readout time scales the distortion correction
+% Readout time scales the distortion correction
 % linearly, so one of the two is wrong by that factor. TotalReadoutTime and
 % EstimatedTotalReadoutTime are different BIDS fields and may legitimately
 % differ, but not usually by this much.
-TOTAL_READOUT_MS = 34.775;
+TOTAL_READOUT_MS = 33.2499;
 
 % Blip direction for SPM FieldMap, +1 or -1. Depends on the phase-encode
 % direction of the TASK, not the fieldmap.
 % BIDS PhaseEncodingDirection: j -> typically +1, j- -> typically -1.
-BLIP_DIRECTION = -1;
+BLIP_DIRECTION = 1;
 
 % Is the fieldmap itself EPI-based? 0 = no (GRE magnitude + phasediff),
 % 1 = yes. A fieldmap made from a GRE phasediff is NOT EPI-based; with 1,
@@ -65,8 +64,8 @@ EPI_BASED_FIELDMAP = 0;
 
 C.realignunwarp.eoptions = struct( ...
     'quality', 1, ...
-    'sep',     4, ...
-    'fwhm',    5, ...
+    'sep',     1.5, ...
+    'fwhm',    1, ...
     'rtm',     1, ...
     'einterp', 4, ...
     'ewrap',   [0 1 0], ...
@@ -88,7 +87,7 @@ C.realignunwarp.uweoptions = struct( ...
 C.realignunwarp.uwroptions = struct( ...
     'uwwhich', [2 1], ...       % [2 1] = write resliced images + mean
     'rinterp', 6, ...
-    'wrap',    [0 0 0], ...
+    'wrap',    [0 1 0], ...
     'mask',    0);              % prefix comes from config.sh (RESLICE_PREFIX)
 
 
@@ -244,6 +243,6 @@ C.GLM.avgOriAcrossRuns         = 1;
 %   'aligned_misaligned'          one regressor for events aligned with the
 %                                 mean grid orientation, one for misaligned
 %   'aligned_misaligned_multiple' one regressor per orientation
-C.GLM.gridRegressorMethod = 'aligned_misaligned';
+C.GLM.gridRegressorMethod = 'pmod';
 
 end
