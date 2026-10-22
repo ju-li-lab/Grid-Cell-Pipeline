@@ -20,7 +20,7 @@
 # ============================================================================
 
 # >>> 1. Which directory to import (one GLM output variant at a time).
-DATA_DIR <- "/Users/juli/Desktop/results_noavg/"
+DATA_DIR <- "/Users/juli/Desktop/results_oap/"
 
 # >>> 2. Subject-level info (group, age, ...).
 #     A CSV with one row per subject. If it does not exist yet, the script
@@ -163,7 +163,17 @@ tidy_one_file <- function(path) {
       contrast      = as.numeric(b[["MEAN CON-VALUE WITHIN ROI"]]),
       n_voxels      = as.integer(b[["VOXELS WITHIN ROI"]]),
       n_nan_voxels  = as.integer(b[["NaN VOXELS WITHIN ROI"]])
-    )
+    ) %>%
+      # Share of the mask that was unusable. Masks differ in size between
+      # subjects and hemispheres, so the raw count is not comparable across
+      # rows and the percentage is what you actually want to look at.
+      # NA rather than NaN when n_voxels is 0 or missing, so filters and
+      # summaries behave.
+      mutate(pct_nan = if_else(
+        !is.na(n_voxels) & n_voxels > 0,
+        100 * n_nan_voxels / n_voxels,
+        NA_real_
+      ))
   }
 
   # ---- 4b. Between-voxel coherence: Rayleigh z / p ------------------------
@@ -392,7 +402,7 @@ if (isTRUE(SAVE_CSV)) {
 #    run             "1","2","3",...,"avg"            run_num  1,2,3, NA for "avg"
 #    is_average      TRUE for the across-runs row
 #    contrast        aligned vs misaligned mean con-value   <- main measure
-#    n_voxels, n_nan_voxels
+#    n_voxels, n_nan_voxels, pct_nan   100 * n_nan_voxels / n_voxels
 #    rayleigh_z, rayleigh_p        between-voxel orientation coherence
 #    ori_weighted, ori_unweighted  mean grid orientation in degrees
 #    grid_event      "translate"

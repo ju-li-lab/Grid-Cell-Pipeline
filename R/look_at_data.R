@@ -15,7 +15,7 @@ library(ggplot2)
 
 # ---- pick what to look at --------------------------------------------------
 
-d <- grid_runs %>% filter(run == "avg", hemisphere == "bilat")
+d <- grid_runs %>% filter(run != "avg", hemisphere == "bilat")
 
 # other slices to try — swap one of these in:
 # d <- grid_runs %>% filter(run == "2",   hemisphere == "left")
@@ -24,7 +24,7 @@ d <- grid_runs %>% filter(run == "avg", hemisphere == "bilat")
 # d <- grid_runs %>% filter(run != "avg", hemisphere == "left")   # all runs
 
 d %>%
-  select(subject_id, group, session, contrast, n_voxels, n_nan_voxels) %>%
+  select(subject_id, group, session, contrast, n_voxels, n_nan_voxels, pct_nan) %>%
   print(n = Inf)
 
 
@@ -44,10 +44,10 @@ print(p1)
 # ---- NaN voxels per subject ------------------------------------------------
 # how much of the mask was actually usable
 
-p2 <- ggplot(d, aes(x = subject_id, y = n_nan_voxels, fill = factor(session))) +
+p2 <- ggplot(grid_runs, aes(x = subject_id, y = contrast, fill = factor(run_num))) +
   geom_col(position = "dodge") +
-  labs(title = "NaN voxels in the mask — run 1, left ErC",
-       x = NULL, y = NULL, fill = "session") +
+  labs(title = "Checkman",
+       x = NULL, y = NULL, fill = "contrast") +
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 print(p2)
@@ -56,7 +56,7 @@ print(p2)
 # ---- do the two go together? -----------------------------------------------
 # if subjects with more dropout also have bigger contrasts, that's a worry
 
-p3 <- ggplot(d, aes(x = n_nan_voxels, y = contrast)) +
+p3 <- ggplot(d, aes(x = pct_nan, y = contrast)) +
   geom_point(size = 2) +
   geom_smooth(method = "lm", formula = y ~ x, se = FALSE) +
   geom_hline(yintercept = 0, linetype = "dashed") +
@@ -64,6 +64,43 @@ p3 <- ggplot(d, aes(x = n_nan_voxels, y = contrast)) +
        x = "X Axis label", y = "Y axis label") +
   theme_minimal()
 print(p3)
+
+
+# ---- contrast across runs, one line per subject ----------------------------
+# Spaghetti plot, one panel per session. Does a subject's contrast hold up
+# from run to run, or is it carried by a single run?
+#
+# "avg" is excluded on purpose: it is a summary of these same points, not
+# another measurement, so plotting it would bend each line towards its own
+# mean. run_num is used on the x axis rather than the `run` factor because it
+# is numeric, which keeps the points evenly spaced and lets the line join
+# them in run order.
+#
+# This builds its own slice rather than using `d`, so editing the filter at
+# the top of the script cannot quietly put three hemispheres on one line.
+
+HEMI <- "bilat"          # "bilat", "left" or "right"
+
+d_runs <- grid_runs %>% filter(!is_average, hemisphere == HEMI)
+
+p4 <- ggplot(d_runs, aes(x = run_num, y = contrast,
+                         colour = subject_id, group = subject_id)) +
+  geom_hline(yintercept = 0, linetype = "dashed", colour = "grey60") +
+  geom_line(alpha = 0.6) +
+  geom_point(size = 2) +
+  facet_wrap(~ session, labeller = label_both) +
+  scale_x_continuous(breaks = sort(unique(d_runs$run_num))) +
+  labs(title = paste0("Grid contrast across runs — ", HEMI, " ErC"),
+       x = "run", y = "aligned vs misaligned", colour = "subject") +
+  theme_minimal()
+print(p4)
+
+# With many subjects the colour legend stops being readable. Two ways out:
+#   drop the legend and give each subject its own small panel
+# p4 + facet_grid(session ~ subject_id) + theme(legend.position = "none")
+#   or keep the spaghetti and add the group mean on top
+# p4 + stat_summary(aes(group = 1), fun = mean, geom = "line",
+#                   colour = "black", linewidth = 1)
 
 
 # a few more things you might want:
@@ -74,13 +111,13 @@ print(p3)
 # same plot, but one panel per session
 # ggplot(d, aes(x = subject_id, y = contrast)) + geom_col() + facet_wrap(~ session)
 
-# NaN voxels as a share of the mask — fairer when masks differ a lot in size
-# d %>% mutate(pct_nan = 100 * n_nan_voxels / n_voxels) %>%
-#   ggplot(aes(x = subject_id, y = pct_nan, fill = factor(session))) +
+# NaN voxels as a share of the mask — pct_nan comes straight from the
+# importer now, no need to compute it here
+# ggplot(d, aes(x = subject_id, y = pct_nan, fill = factor(session))) +
 #   geom_col(position = "dodge")
 
 # group means
 # d %>% group_by(group) %>% summarise(mean(contrast), sd(contrast), n())
 
-# the plots stay around as p1, p2, p3 — type p1 to draw it again, or save it
+# the plots stay around as p1..p4 — type p1 to draw it again, or save it
 # ggsave("contrast_run1_left.png", p1, width = 8, height = 4, dpi = 300)
