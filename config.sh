@@ -72,7 +72,7 @@ RUN_VARIANT=6f_t5_am_keep1_avg_1
 # -----------------------------------------------------------------------------
 
 # Task labels, comma-separated, matching task-<LABEL> in the BIDS filenames.
-TASKS=1,2
+TASKS=1,2,3
 
 # How to correct distortion:
 #   realign_unwarp   GRE fieldmap: needs phasediff + magnitude1 in fmap/.
