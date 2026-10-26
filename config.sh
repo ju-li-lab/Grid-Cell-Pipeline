@@ -114,7 +114,7 @@ DO_COREG_ROIS=1
 #   EXCLUDE_SESSIONS=ses-03,ses-05
 INCLUDE_SUBJECTS=
 INCLUDE_SESSIONS=
-EXCLUDE_SUBJECTS=sub-07s17,sub-06s17
+EXCLUDE_SUBJECTS=sub-07s17
 EXCLUDE_SESSIONS=
 
 # Skip subject-sessions that have no ROI masks in anat/ (saves time).
@@ -158,7 +158,7 @@ ROI_MODE=both
 
 # Written by: bash tools/scan_multirun.sh
 # Empty = rely on acquisition-time matching alone.
-RUN_SELECTION_FILE=/sc-projects/sc-proj-cc02-brainspace/myspace/julius/SOLIS_GC/preproc_testing/Grid-Cell-Pipeline/run_selection.tsv
+RUN_SELECTION_FILE=/sc-projects/sc-proj-cc02-brainspace/myspace/julius/SOLIS_GC/Grid-Cell-Pipeline/run_selection.tsv
 
 # How far apart two scans may be acquired and still count as the same visit
 # to the scanner, in minutes.
