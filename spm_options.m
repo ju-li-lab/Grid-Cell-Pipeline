@@ -199,6 +199,23 @@ C.coreg.roptions = struct( ...
 
 
 %% ========================================================================
+%  6b. SLICE TIMING  (spm.temporal.st)
+%  ========================================================================
+%  Where in the TR everything is shifted to, as a fraction: 0.5 is the
+%  middle, 0 the first slice acquired.
+%
+%  This is tied to the GLM below. SPM samples the design matrix at
+%  microtimeOnset of microtimeResolution bins, so after correcting to
+%  fraction f you want microtimeOnset = f * microtimeResolution. At 0.5 and
+%  16 bins that is 8, which is what section 9 has. The slicetime stage
+%  checks the pair and warns if you change one without the other.
+%
+%  The slice TIMES themselves are not set here: they are read from each
+%  run's JSON sidecar, so no slice order has to be assumed.
+C.slicetime.ref_fraction = 0.5;
+
+
+%% ========================================================================
 %  7. SMOOTHING  (spm.spatial.smooth)
 %  ========================================================================
 

@@ -126,14 +126,19 @@ trap 'rm -f "$TMP" "${TMP}.gz" "${TMP}.keep"' EXIT
 U_PREFIX="${RESLICE_PREFIX:-u}"
 S_PREFIX="${SMOOTH_PREFIX:-s}"
 R_PREFIX="${ROI_PREFIX:-r}"
+A_PREFIX="${SLICETIME_PREFIX:-a}"
 
 find "$SCOPE" -type d -name func -print0 2>/dev/null | while IFS= read -r -d '' d; do
     find "$d" -maxdepth 1 -type f \( \
         -name "${U_PREFIX}sub-*_bold*.nii"            -o \
         -name "${S_PREFIX}${U_PREFIX}sub-*_bold*.nii" -o \
+        -name "${A_PREFIX}sub-*_bold*.nii"                       -o \
+        -name "${U_PREFIX}${A_PREFIX}sub-*_bold*.nii"            -o \
+        -name "${S_PREFIX}${U_PREFIX}${A_PREFIX}sub-*_bold*.nii" -o \
         -name "*_bold_dc.nii"                         -o \
         -name "rp_sub-*.txt"                          -o \
         -name "mean${U_PREFIX}sub-*.nii"              -o \
+        -name "mean${U_PREFIX}${A_PREFIX}sub-*.nii"   -o \
         -name "meansub-*.nii"                         -o \
         -name "meanu_session.nii"                     -o \
         -name "vdm_*"    -o -name "vdm5_*"            -o \

@@ -161,6 +161,7 @@ can stop after any of them, inspect or replace the intermediate files, and resum
 |---|---|---|
 | `topup` | FSL topup distortion field | `func/topup_results_*` |
 | `vdm` | one voxel displacement map per task | `func/vdm_task-<N>.nii` |
+| `slicetime` | shift every slice to the same point in the TR | `a*_bold.nii` |
 | `realign` | apply the correction + motion correction | `u*_bold.nii`, `rp_*.txt`, `meanu_session.nii` |
 | `coreg` | T2w → session mean, reslice the ROIs | `anat/r*_mask.nii` |
 | `smooth` | Gaussian smoothing | `func/su*_bold.nii` |
@@ -173,7 +174,38 @@ bash submit_preproc.sh --stages realign,coreg,smooth       # resume from ready-m
 bash submit_preproc.sh --stages smooth                     # just re-smooth
 ```
 
-Shorthands: `all`, `fieldmap` (= topup,vdm), `post_fieldmap` (= realign,coreg,smooth).
+Shorthands: `all`, `fieldmap` (= topup,vdm), `post_fieldmap` (= slicetime,realign,coreg,smooth), `stc` (= slicetime).
+
+### Slice timing
+
+Off unless `DO_SLICE_TIMING=1` in `config.sh`. It reads **`SliceTiming` from
+each run's own JSON sidecar** rather than assuming an order, and fails loudly
+if the sidecar has none — correcting with the wrong slice order is worse than
+not correcting at all, so it will not guess.
+
+Everything is shifted to `C.slicetime.ref_fraction` of the TR (default 0.5, the
+middle). That has to agree with the GLM: SPM samples the design matrix at
+`microtimeOnset` of `microtimeResolution` bins, so at 0.5 you want
+`microtimeOnset = microtimeResolution/2`. The stage checks the pair and warns
+if you change one without the other.
+
+Turning it on changes which files every later stage reads, because the
+corrected ones carry `SLICETIME_PREFIX`:
+
+| | prefix |
+|---|---|
+| plain | `u` |
+| `SMOOTH_FWHM>0` | `su` |
+| `DO_SLICE_TIMING=1` | `ua` |
+| both | `sua` |
+
+That is derived, never stored — `func_prefix()` in `bids_common.sh` for the
+shell side and the same rule in `run_gridcat_analysis.m`. So after changing it,
+re-run from `slicetime` onwards:
+
+```bash
+bash submit_preproc.sh --stages slicetime,realign,coreg,smooth
+```
 
 ---
 

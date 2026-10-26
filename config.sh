@@ -91,12 +91,14 @@ PREPROC_MODE=realign_unwarp
 #             Does nothing unless PREPROC_MODE=topup.
 #   vdm       one voxel displacement map per task.  -> func/vdm_task-<N>.nii
 #             Does nothing for realign_only, or topup+applytopup.
+#   slicetime shift every slice to the same point in the TR.  -> a*_bold.nii
+#             Does nothing when DO_SLICE_TIMING=0.
 #   realign   apply the correction + motion correction.
 #             -> u*_bold.nii, rp_*.txt, meanu_session.nii
 #   coreg     coregister T2w -> session mean, reslice ROIs.  -> anat/r*_mask.nii
 #   smooth    Gaussian smoothing.  -> func/su*_bold.nii
 #
-# Shorthands: all, fieldmap (= topup,vdm), post_fieldmap (= realign,coreg,smooth)
+# Shorthands: all, fieldmap (= topup,vdm), post_fieldmap (= slicetime,realign,coreg,smooth)
 # Override for one submission:  bash 01_preprocess.sbatch --stages smooth
 PREPROC_STAGES=all
 
@@ -249,6 +251,24 @@ FIELDMAP_MAGNITUDE_SOURCE=structural
 RESLICE_PREFIX=u
 SMOOTH_PREFIX=s
 ROI_PREFIX=r
+SLICETIME_PREFIX=a
+
+# Correct for the fact that slices within a volume are acquired at
+# different times? (1=yes, 0=no)
+#
+# Needs SliceTiming in the BOLD JSON sidecars - the stage reads the actual
+# times per run rather than assuming an order, because correcting with the
+# wrong order is worse than not correcting. It fails loudly if SliceTiming
+# is absent instead of guessing.
+#
+# Worth it when slices span a large part of the TR. Here 30 slices are
+# acquired sequentially over 1.97 s of a 2.06 s TR, so two slices can be
+# almost a whole TR apart.
+#
+# Changing this changes which files every later stage reads (the corrected
+# ones carry SLICETIME_PREFIX), so re-run the preprocessing from "slicetime"
+# onwards after changing it.
+DO_SLICE_TIMING=1
 
 # Smoothing kernel FWHM in mm, isotropic. 0 skips smoothing entirely.
 #

@@ -152,9 +152,14 @@ CFG.TOPUP_EXISTING_PREFIX    = cfg_or(cfgRaw, 'TOPUP_EXISTING_PREFIX', '');
 
 % Output prefixes. config.sh owns these because the shell scripts need them
 % too. FUNC_PREFIX is not stored anywhere: it is whatever these two produce.
-CFG.RESLICE_PREFIX = cfg_or(cfgRaw, 'RESLICE_PREFIX', 'u');
-CFG.SMOOTH_PREFIX  = cfg_or(cfgRaw, 'SMOOTH_PREFIX',  's');
-CFG.ROI_PREFIX     = cfg_or(cfgRaw, 'ROI_PREFIX',     'r');
+CFG.RESLICE_PREFIX   = cfg_or(cfgRaw, 'RESLICE_PREFIX',   'u');
+CFG.SMOOTH_PREFIX    = cfg_or(cfgRaw, 'SMOOTH_PREFIX',    's');
+CFG.ROI_PREFIX       = cfg_or(cfgRaw, 'ROI_PREFIX',       'r');
+CFG.SLICETIME_PREFIX = cfg_or(cfgRaw, 'SLICETIME_PREFIX', 'a');
+
+% Slice timing is optional. When it is on, every later stage reads the
+% corrected files, so the flag is checked in more than one place.
+CFG.DO_SLICE_TIMING = cfg_flag(cfgRaw, 'DO_SLICE_TIMING', false);
 CFG.SMOOTH_FWHM    = str2double(cfg_or(cfgRaw, 'SMOOTH_FWHM', '0'));
 
 % ---- from spm_options.m ----
@@ -247,7 +252,7 @@ taskVols      = cell(nTasks,1);
 taskVDM       = cell(nTasks,1);
 taskBoldFiles = cell(nTasks,1);
 
-needVols = STAGES.vdm || STAGES.realign;
+needVols = STAGES.vdm || STAGES.slicetime || STAGES.realign;
 
 % Smoothing on its own reads only what the earlier stages left in the
 % derivatives, so there is nothing to choose and nothing to copy.
@@ -444,6 +449,53 @@ if STAGES.vdm
         end
     end
 end
+
+% =====================================================================
+%  STAGE slicetime — shift every slice to the same point in the TR
+% =====================================================================
+%  Optional, and off unless DO_SLICE_TIMING=1 in config.sh. It sits here
+%  rather than before the fieldmap stages because the VDM is matched to an
+%  untouched EPI reference; slice timing resamples in time only, so the
+%  geometry the VDM was built against is unchanged.
+%
+%  Whether or not this run performs the stage, anything downstream has to
+%  read the corrected files if an earlier run wrote them - otherwise
+%  resuming with --stages realign,coreg,smooth would silently go back to
+%  the uncorrected data.
+
+if STAGES.slicetime
+    if ~CFG.DO_SLICE_TIMING
+        fprintf('\n=== STAGE slicetime: skipped (DO_SLICE_TIMING=0) ===\n');
+    else
+        fprintf('\n=== STAGE slicetime: correcting to %.2f x TR ===\n', ...
+                CFG.spm.slicetime.ref_fraction);
+        corrected = slice_time_correct(taskBoldFiles, CFG);
+        for ii = 1:nTasks
+            if isempty(corrected{ii}), continue; end
+            taskBoldFiles{ii} = corrected{ii};
+            taskVols{ii}      = expand_4d(corrected{ii});
+        end
+    end
+elseif CFG.DO_SLICE_TIMING && (STAGES.realign || STAGES.smooth)
+    % Resuming after a separate slicetime run: pick up what it wrote.
+    for ii = 1:nTasks
+        if isempty(taskBoldFiles{ii}), continue; end
+        [d, n, e] = fileparts(taskBoldFiles{ii});
+        cand = fullfile(d, [CFG.SLICETIME_PREFIX n e]);
+        if isfile(cand)
+            fprintf('Using slice-time corrected BOLD: %s\n', [CFG.SLICETIME_PREFIX n e]);
+            taskBoldFiles{ii} = cand;
+            if needVols, taskVols{ii} = expand_4d(cand); end
+        elseif STAGES.realign
+            error('run_spm_preproc:NoSliceTimedBold', [ ...
+                  'DO_SLICE_TIMING=1 but no slice-time corrected BOLD for task-%s:\n' ...
+                  '  expected %s\n' ...
+                  'Run the "slicetime" stage first, or set DO_SLICE_TIMING=0.'], ...
+                  CFG.TASK_LABELS{ii}, cand);
+        end
+    end
+end
+
 
 % =====================================================================
 %  STAGE realign — apply the correction + motion correction
@@ -688,16 +740,16 @@ function S = resolve_stages(spec)
 %
 % spec may be:
 %   ''  or  'all'                     -> every stage
-%   'topup,vdm,realign,coreg,smooth'  -> an explicit comma-separated list
+%   'topup,vdm,slicetime,realign,coreg,smooth' -> an explicit list
 %   {'realign','coreg'}               -> the same as a cell array
 %   'fieldmap'                        -> shorthand for topup,vdm
-%   'post_fieldmap'                   -> shorthand for realign,coreg,smooth
+%   'post_fieldmap'                   -> shorthand for slicetime,realign,coreg,smooth
 %
 % Returns a struct with one logical field per stage, plus:
 %   .list     stage names to run, in canonical order
 %   .skipped  stage names that will not run, in canonical order
 
-ALL = {'topup','vdm','realign','coreg','smooth'};
+ALL = {'topup','vdm','slicetime','realign','coreg','smooth'};
 
 if isempty(spec)
     spec = 'all';
@@ -728,7 +780,9 @@ for i = 1:numel(parts)
         case {'fieldmap','fieldmaps','fmap'}
             sel = [sel, {'topup','vdm'}]; %#ok<AGROW>
         case {'post_fieldmap','postfieldmap','post-fieldmap'}
-            sel = [sel, {'realign','coreg','smooth'}]; %#ok<AGROW>
+            sel = [sel, {'slicetime','realign','coreg','smooth'}]; %#ok<AGROW>
+        case {'stc','slice_timing','slice-timing'}
+            sel = [sel, {'slicetime'}]; %#ok<AGROW>
         case {'unwarp','realign_unwarp'}
             sel = [sel, {'realign'}]; %#ok<AGROW>
         otherwise
@@ -736,7 +790,7 @@ for i = 1:numel(parts)
                 error('run_spm_preproc:UnknownStage', [ ...
                       'Unknown preprocessing stage: "%s"\n' ...
                       'Valid stages: %s\n' ...
-                      'Shorthands:   all, fieldmap (topup,vdm), post_fieldmap (realign,coreg,smooth)'], ...
+                      'Shorthands:   all, fieldmap (topup,vdm), post_fieldmap (slicetime,realign,coreg,smooth), stc'], ...
                       p, strjoin(ALL, ', '));
             end
             sel{end+1} = p; %#ok<AGROW>

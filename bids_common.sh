@@ -110,18 +110,27 @@ require_command() {
 # SMOOTH_PREFIX on top of that when smoothing runs. Keeping this as its
 # own config key meant it could disagree with what SPM had written, and
 # it did.
-#   SMOOTH_FWHM=0  -> u
-#   SMOOTH_FWHM>0  -> su
+#   plain                             -> u
+#   SMOOTH_FWHM>0                     -> su
+#   DO_SLICE_TIMING=1                 -> ua
+#   DO_SLICE_TIMING=1, SMOOTH_FWHM>0  -> sua
 func_prefix() {
     local reslice="${RESLICE_PREFIX:-u}" smooth="${SMOOTH_PREFIX:-s}"
-    local fwhm="${SMOOTH_FWHM:-0}"
+    local stc="${SLICETIME_PREFIX:-a}"
+    local fwhm="${SMOOTH_FWHM:-0}" dostc="${DO_SLICE_TIMING:-0}"
+
+    # SPM prepends, so the prefixes stack inwards-out in stage order:
+    #   raw -> a (slice timing) -> u (reslice) -> s (smooth)  =>  "sua"
+    local p="$reslice"
+    if [[ "$dostc" == "1" || "$dostc" == "true" ]]; then
+        p="${p}${stc}"
+    fi
     # Non-zero and non-empty means smoothing ran. Compared as a string so
     # a decimal like 2.5 works without needing bc.
     if [[ -n "$fwhm" && "$fwhm" != "0" && "$fwhm" != "0.0" ]]; then
-        printf '%s%s' "$smooth" "$reslice"
-    else
-        printf '%s' "$reslice"
+        p="${smooth}${p}"
     fi
+    printf '%s' "$p"
 }
 
 # deriv_session <dataset-dir> <sub> <ses> [modality]
