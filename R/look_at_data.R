@@ -79,7 +79,7 @@ print(p3)
 # This builds its own slice rather than using `d`, so editing the filter at
 # the top of the script cannot quietly put three hemispheres on one line.
 
-HEMI <- "bilat"          # "bilat", "left" or "right"
+HEMI <- "left"          # "bilat", "left" or "right"
 
 d_runs <- grid_runs %>% filter(!is_average, hemisphere == HEMI)
 
