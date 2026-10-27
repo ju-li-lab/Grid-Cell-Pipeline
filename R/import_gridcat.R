@@ -20,7 +20,7 @@
 # ============================================================================
 
 # >>> 1. Which directory to import (one GLM output variant at a time).
-DATA_DIR <- "/Users/juli/Desktop/results_thr06/"
+DATA_DIR <- "/Users/juli/Desktop/results_neg_nostc/"
 
 # >>> 2. Subject-level info (group, age, ...).
 #     A CSV with one row per subject. If it does not exist yet, the script
@@ -30,7 +30,7 @@ SUBJECT_INFO_CSV <- "subject_info.csv"
 # >>> 3. Where to write the imported CSVs. Set SAVE_CSV <- FALSE to skip.
 #     Note: the filenames are fixed, so importing a second variant overwrites
 #     the first. Add a prefix here if you want to keep several side by side.
-SAVE_CSV   <- FALSE
+SAVE_CSV   <- TRUE
 OUTPUT_DIR <- "."
 
 # >>> 4. Filename pattern.

@@ -44,7 +44,7 @@ print(p1)
 # ---- NaN voxels per subject ------------------------------------------------
 # how much of the mask was actually usable
 
-p2 <- ggplot(grid_runs, aes(x = subject_id, y = pct_nan, fill = factor(session))) +
+p2 <- ggplot(grid_runs, aes(x = subject_id, y = contrast, fill = factor(session))) +
   geom_col(position = "dodge") +
   labs(title = "Checkman",
        x = NULL, y = NULL, fill = "session") +
@@ -81,7 +81,7 @@ print(p3)
 
 HEMI <- "left"          # "bilat", "left" or "right"
 
-d_runs <- grid_runs %>% filter(!is_average, hemisphere == HEMI)
+d_runs <- grid_runs %>% filter(!is_average, hemisphere == HEMI, rayleigh_p <= 5)
 
 p4 <- ggplot(d_runs, aes(x = run_num, y = contrast,
                          colour = subject_id, group = subject_id)) +
