@@ -27,6 +27,9 @@ slprj/
 .RData
 .Rproj.user/
 
+/R/*csv
+/R/R.Rproj
+
 # Claude and other
 .claude
 *claude*
