@@ -275,6 +275,39 @@ ASHS segmentation
                   └─ the coreg stage reslices them into EPI space
 ```
 
+### When the coregistration will not hold
+
+A T2w slab and a partial-volume task EPI overlap in only a small block of
+tissue. Normalised mutual information over a small overlap has a degenerate
+optimum: driving the two images apart shrinks the overlap to a near-uniform
+sliver, which can score better than the true alignment. When that happens SPM
+does not complain — it writes a mask that misses the brain, GridCAT finds
+nothing in it, and the session disappears from the analysis with no record of
+why. One session failed this way with the T2w translated 141 mm and both masks
+resliced to zero voxels.
+
+Two settings in `config.sh` deal with it:
+
+```bash
+COREG_VIA_TASK=rest        # route T2w -> whole-brain EPI -> session mean
+COREG_MIN_ROI_VOXELS=5     # fail the job instead of writing an empty mask
+```
+
+`COREG_VIA_TASK` names the task label of a whole-brain run (a resting-state
+scan is the usual one). That image overlaps both the T2w and the task EPI
+generously, so neither step is a hard registration. Empty means the direct
+route, which stays the default.
+
+The masks are still resampled **once**. Both coregistration steps are
+estimate-only — they update the orientation matrix in each header and move no
+voxels — and the single reslice at the end applies whatever transform has
+accumulated. Two rigid transforms compose into one rigid transform, so the
+bridged route costs no accuracy over the direct one.
+
+After changing either setting, `--stages coreg` is enough: `DERIV_RESET=auto`
+only clears the derivatives when a run starts from its entry stage, so the
+realigned data is reused rather than rebuilt.
+
 `tools/ashs_extract_config.sh` is a separate config on purpose: it is a separate
 tool with its own vocabulary, run by hand, and folding it into `config.sh` would
 recreate the problem that file used to have. The one thing the two must agree on

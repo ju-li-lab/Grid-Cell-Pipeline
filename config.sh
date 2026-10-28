@@ -105,6 +105,30 @@ PREPROC_STAGES=all
 # Coregister T2w -> EPI and reslice ROI masks into EPI space? (1=yes, 0=skip)
 DO_COREG_ROIS=1
 
+# Coregister the T2w to the session mean THROUGH a whole-brain EPI, named
+# here by its task label ('rest' finds func/*_task-rest*_bold.nii). Empty
+# means the direct route.
+#
+# Worth turning on when the T2w and the task EPI are both partial slabs. They
+# then overlap in only a small block of tissue, and normalised mutual
+# information over a small overlap has a degenerate optimum: pushing the
+# images apart shrinks the overlap to a near-uniform sliver that can score
+# better than the true alignment. sub-05 ses-01 failed exactly this way -
+# the T2w ended up 141 mm away and both ROI masks resliced to zero voxels.
+# A whole-brain EPI overlaps both images generously, so each step is easy.
+#
+# The masks are still resampled only ONCE: both coregistration steps are
+# estimate-only, and the single reslice at the end applies the composed
+# transform. Two rigid transforms compose into one rigid transform, so this
+# costs no accuracy over the direct route.
+COREG_VIA_TASK=
+
+# Fail the job when a resliced ROI mask comes back with fewer than this many
+# voxels. A coregistration that diverges does not raise an error - it writes
+# a mask that misses the brain, and the session then disappears from the
+# analysis with nothing to show why. 0 disables the check.
+COREG_MIN_ROI_VOXELS=5
+
 
 # -----------------------------------------------------------------------------
 #  Subject / session filtering

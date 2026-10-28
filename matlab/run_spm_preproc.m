@@ -74,6 +74,10 @@ function run_spm_preproc(BIDS_ROOT, SUB, SES, cfgFile, stages)
 %            u*_bold.nii, rp_*.txt, the per-task means and meanu_session.nii.
 %   coreg    Coregister T2w -> session mean and reslice the ROI masks into EPI
 %            space (r*_mask.nii). Does nothing when DO_COREG_ROIS=0.
+%            Set COREG_VIA_TASK to route this through a whole-brain EPI when
+%            the T2w and the task EPI are both partial slabs; the masks are
+%            still resampled only once. Fails rather than writing a mask with
+%            fewer than COREG_MIN_ROI_VOXELS voxels.
 %   smooth   Gaussian smoothing of the preprocessed BOLD files (su*_bold.nii).
 %            Does nothing when SMOOTH_FWHM=0.
 %
@@ -126,6 +130,10 @@ CFG.SPM_DIR           = cfgRaw.SPM_DIR;
 CFG.PREPROC_MODE      = cfgRaw.PREPROC_MODE;
 CFG.TASK_LABELS       = strtrim(strsplit(cfgRaw.TASKS, ','));
 CFG.DO_COREG_ROIS     = str2double(cfg_or(cfgRaw, 'DO_COREG_ROIS', '1'));
+% Empty = coregister the T2w straight to the session mean. A task label
+% (usually 'rest') routes it through that whole-brain EPI instead.
+CFG.COREG_VIA_TASK    = strtrim(cfg_or(cfgRaw, 'COREG_VIA_TASK', ''));
+CFG.COREG_MIN_ROI_VOXELS = str2double(cfg_or(cfgRaw, 'COREG_MIN_ROI_VOXELS', '5'));
 CFG.ROI_PATTERN_LEFT  = cfgRaw.ROI_PATTERN_LEFT;
 CFG.ROI_PATTERN_RIGHT = cfgRaw.ROI_PATTERN_RIGHT;
 
@@ -324,11 +332,20 @@ end
 t2w = '';  t2wSrc = '';
 roiL = ''; roiR = ''; hasRoiL = false; hasRoiR = false;
 roiLsrc = ''; roiRsrc = '';
+bridge = ''; bridgeSrc = '';
 
 if STAGES.coreg && CFG.DO_COREG_ROIS
     t2wSrc = select_t2w(RAW.anat, SUB, SES, CFG, runSel, anchor);
     t2w = bids_stage(t2wSrc, anatDir);
     fprintf('T2w: %s\n', t2w);
+
+    % Optional whole-brain EPI to coregister through. Staged like everything
+    % else, because the second estimate rewrites its header.
+    if ~isempty(CFG.COREG_VIA_TASK)
+        bridgeSrc = select_coreg_bridge(RAW, SUB, SES, CFG, runSel, anchor);
+        bridge = bids_stage(bridgeSrc, funcDir);
+        fprintf('Coreg bridge: %s\n', bridge);
+    end
 
     % ROI masks may have been imported into the derivatives by move_rois.sh, or
     % may still be sitting in the raw anat/ from an earlier way of working.
@@ -352,7 +369,8 @@ end
 if needSelection
     write_run_manifest(DER, SUB, SES, CFG, boldPicks, ...
         struct('T2w', t2wSrc, 'fieldmap', fieldmapSrc, 'phasediff', phasediffSrc, ...
-               'reverse', reverseSrc, 'roi_left', roiLsrc, 'roi_right', roiRsrc), ...
+               'reverse', reverseSrc, 'roi_left', roiLsrc, 'roi_right', roiRsrc, ...
+               'coreg_bridge', bridgeSrc), ...
         anchor);
 end
 
@@ -566,7 +584,7 @@ if STAGES.coreg
             roiList = {};
             if hasRoiL, roiList{end+1} = roiL; end %#ok<AGROW>
             if hasRoiR, roiList{end+1} = roiR; end %#ok<AGROW>
-            coreg_reslice_rois(sessionMean, t2w, roiList, CFG);
+            coreg_reslice_rois(sessionMean, t2w, roiList, CFG, bridge);
         else
             fprintf('\n=== STAGE coreg: skipped (missing session mean or ROIs) ===\n');
         end
