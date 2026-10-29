@@ -60,6 +60,20 @@ newName = regexprep(newName, '\.gz$', '');
 
 out = fullfile(destDir, newName);
 
+% Staging a file onto itself would destroy it: both branches below delete the
+% destination before writing it. The mtime check that used to sit here made
+% this harmless by accident - a file is never older than itself, so it
+% returned early. Nothing reaches this today (every source is outside
+% destDir), but the cost of a future call site getting it wrong is a deleted
+% input, so say so instead of trusting them.
+dOut = dir(out);  dSrc = dir(srcFile);
+if ~isempty(dOut) && ~isempty(dSrc) && ...
+        strcmp(fullfile(dOut.folder, dOut.name), fullfile(dSrc.folder, dSrc.name))
+    error('bids_stage:SelfCopy', ['Asked to stage a file onto itself:\n  %s\n' ...
+        'A staged copy must come from outside the directory it is staged ' ...
+        'into, or the coregistration would reuse its own output.'], out);
+end
+
 if isGz
     fprintf('  [stage] decompress %s -> %s\n', shortname(srcFile), newName);
     tmpDir = tempname;
