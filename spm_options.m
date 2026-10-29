@@ -50,7 +50,7 @@ TOTAL_READOUT_MS = 33.2499;
 % Blip direction for SPM FieldMap, +1 or -1. Depends on the phase-encode
 % direction of the TASK, not the fieldmap.
 % BIDS PhaseEncodingDirection: j -> typically +1, j- -> typically -1.
-BLIP_DIRECTION = 1;
+BLIP_DIRECTION = -1;
 
 % Is the fieldmap itself EPI-based? 0 = no (GRE magnitude + phasediff),
 % 1 = yes. A fieldmap made from a GRE phasediff is NOT EPI-based; with 1,
@@ -262,11 +262,11 @@ C.GLM.derivatives      = [0 0]; % HRF derivatives: [0 0] none,
 C.GLM.HPF_cutoff       = 128;   % high-pass filter, seconds
 C.GLM.dispDesignMatrix = 0;     % 1 to show the design matrix (debugging only)
 
-C.GLM.eventUsageSpecifier_GLM1 = 4;
-C.GLM.eventUsageSpecifier_GLM2 = 5;
+C.GLM.eventUsageSpecifier_GLM1 = 2;
+C.GLM.eventUsageSpecifier_GLM2 = 3;
 C.GLM.keepUnusedGridEvents     = 1;
 C.GLM.useVoxelWeighting        = 1;
-C.GLM.avgOriAcrossRuns         = 1;
+C.GLM.avgOriAcrossRuns         = 0;
 
 % Which regressor to use for grid events:
 %   'pmod'                        one regressor with a parametric modulation
