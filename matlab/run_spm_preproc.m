@@ -264,7 +264,17 @@ needVols = STAGES.vdm || STAGES.slicetime || STAGES.realign;
 
 % Smoothing on its own reads only what the earlier stages left in the
 % derivatives, so there is nothing to choose and nothing to copy.
-needSelection = STAGES.topup || STAGES.vdm || STAGES.realign || STAGES.coreg;
+%
+% Two different questions, and they have different answers for coreg:
+%   needSelection  do we have to CHOOSE runs? coreg does - the anchor decides
+%                  which T2w, ROI masks and bridge EPI go with these runs.
+%   needBoldFiles  do we have to STAGE the BOLD itself? coreg does not: it
+%                  reads the session mean that realignment already left in the
+%                  derivatives. Staging three decompressed runs it never opens
+%                  is the slowest part of a coreg-only re-run.
+needSelection = STAGES.topup || STAGES.vdm || STAGES.slicetime || ...
+                STAGES.realign || STAGES.coreg;
+needBoldFiles = STAGES.topup || STAGES.vdm || STAGES.slicetime || STAGES.realign;
 
 boldPicks = repmat(struct('label', '', 'path', '', 'runLabel', '', ...
                           'acqSec', NaN, 'reason', ''), nTasks, 1);
@@ -279,9 +289,11 @@ if needSelection
     fprintf('\n--- Choosing runs ---\n');
     [boldPicks, anchor] = select_task_bolds(RAW.func, SUB, SES, CFG, runSel, needVols);
 
-    for ii = 1:nTasks
-        if isempty(boldPicks(ii).path), continue; end
-        taskBoldFiles{ii} = bids_stage(boldPicks(ii).path, funcDir);
+    if needBoldFiles
+        for ii = 1:nTasks
+            if isempty(boldPicks(ii).path), continue; end
+            taskBoldFiles{ii} = bids_stage(boldPicks(ii).path, funcDir);
+        end
     end
 
     if ~isnan(anchor.sec)
