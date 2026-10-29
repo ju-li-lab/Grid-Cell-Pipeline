@@ -15,7 +15,7 @@ library(ggplot2)
 
 # ---- pick what to look at --------------------------------------------------
 
-d <- grid_runs %>% filter(run != "avg", hemisphere == "bilat")
+d <- grid_runs %>% filter(run != "avg", hemisphere == "left")
 
 # other slices to try — swap one of these in:
 # d <- grid_runs %>% filter(run == "2",   hemisphere == "left")

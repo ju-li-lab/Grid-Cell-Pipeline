@@ -28,7 +28,7 @@ function coreg_reslice_rois(refEPI, t2w, roiFiles, CFG, bridgeEPI)
 if nargin < 5, bridgeEPI = ''; end
 
 rois   = roiFiles(:);
-moving = [{t2w}; rois];        % reslice the T2w too, for looking at
+moving = [{t2w}; rois];        % what rides along through the estimates
 
 if isempty(bridgeEPI)
     estimate(refEPI, t2w, rois, CFG);
@@ -39,7 +39,13 @@ else
     estimate(refEPI,  bridge, moving, CFG);   % bridge (+ T2w + masks) -> mean
 end
 
-reslice(refEPI, moving, CFG);
+% Two writes, because the two kinds of image need different interpolation.
+% The masks get whatever spm_options.m asks for. The T2w is resliced only so
+% there is something to look at, and it is NOT a label map - a T2w carries a
+% couple of thousand distinct intensities - so label interpolation refuses it
+% with "Too many label values". It gets splines whatever the masks are set to.
+reslice(refEPI, rois,  CFG, CFG.spm.coreg.roptions.interp);
+reslice(refEPI, {t2w}, CFG, 4);
 check_rois(rois, CFG);
 end
 
@@ -57,10 +63,12 @@ spm_jobman('run', matlabbatch);
 end
 
 
-function reslice(ref, source, CFG)
-% The one resampling. roptions.interp is 0 in spm_options.m (nearest
-% neighbour), which is the correct choice for label masks.
+function reslice(ref, source, CFG, interp)
+% One resampling per image. roptions.interp in spm_options.m is the MASKS'
+% setting - 0 (nearest neighbour) and -1 (label) are both right for them.
+% Anything continuous must be passed its own interp by the caller.
 roptions        = CFG.spm.coreg.roptions;
+roptions.interp = interp;
 roptions.prefix = CFG.ROI_PREFIX;            % config.sh owns the prefix
 
 matlabbatch = {};

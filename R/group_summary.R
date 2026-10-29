@@ -41,7 +41,7 @@ if (!exists("complete_subjects")) {
 
 # ---- settings --------------------------------------------------------------
 
-HEMI <- "bilat"        # "left", "right" or "bilat". Never pool hemispheres:
+HEMI <- "right"        # "left", "right" or "bilat". Never pool hemispheres:
                       # each has its own grid orientation.
 
 SESSIONS <- NULL      # NULL = all sessions, or e.g. c(1) for session 1 only.

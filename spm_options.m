@@ -192,8 +192,21 @@ C.coreg.eoptions = struct( ...
                  0.01 0.01 0.01 0.001 0.001 0.001], ...
     'fwhm',     [7 7]);
 
+%  interp here applies to the ROI MASKS only:
+%     0  nearest neighbour - one input sample per output voxel
+%    -1  label (SPM25+)    - area-weighted vote over the inputs
+%
+%  Prefer -1. The ASHS masks are 0.39 x 0.39 x 2.0 mm against a 2 mm EPI, so
+%  in-plane this is a 5x downsample and nearest neighbour keeps 1 of every 25
+%  samples. Measured over all 36 masks in spm-preproc-oap, NN retained only
+%  61% of the true mask volume (range 42-79%), which matters a great deal
+%  when the surviving ROI is already only a few voxels.
+%
+%  The T2w is NOT resliced with this. coreg_reslice_rois.m writes it with
+%  splines in a second call, because a T2w has a couple of thousand distinct
+%  intensities and SPM's label path rejects it ("Too many label values").
 C.coreg.roptions = struct( ...
-    'interp', 0, ...            % 0 = nearest neighbour, correct for label masks
+    'interp', -1, ...
     'wrap',   [0 0 0], ...
     'mask',   0);               % prefix comes from config.sh (ROI_PREFIX)
 
