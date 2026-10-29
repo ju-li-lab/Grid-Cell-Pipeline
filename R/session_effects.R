@@ -37,7 +37,7 @@ if (!exists("complete_subjects")) {
 
 # ---- settings --------------------------------------------------------------
 
-HEMI <- "left"        # "left", "right" or "bilat"
+HEMI <- "bilat"        # "left", "right" or "bilat"
 
 METRIC <- "contrast"  # per-run metric to test. "contrast" is the grid code
                       # magnitude; "rayleigh_z" is spatial stability.
