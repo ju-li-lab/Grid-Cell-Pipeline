@@ -91,7 +91,7 @@ p4 <- ggplot(d_runs, aes(x = run_num, y = contrast,
   facet_wrap(~ session, labeller = label_both) +
   scale_x_continuous(breaks = sort(unique(d_runs$run_num))) +
   labs(title = paste0("Grid contrast across runs — ", HEMI, " ErC"),
-       x = "run", y = "aligned vs misaligned", colour = "subject") +
+       x = "run", y = "pmod contrast", colour = "subject") +
   theme_minimal()
 print(p4)
 
@@ -105,7 +105,7 @@ p5 <- ggplot(d_runs, aes(x = run_num, y = rayleigh_z,
   labs(title = paste0("Rayleigh Z across runs — ", HEMI, " ErC"),
        x = "run", y = "Rayleigh Z", colour = "subject") +
   theme_minimal()
-#print(p5)
+print(p5)
 
 # With many subjects the colour legend stops being readable. Two ways out:
 #   drop the legend and give each subject its own small panel

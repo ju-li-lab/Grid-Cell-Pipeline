@@ -292,7 +292,7 @@ if ("rayleigh_z" %in% names(runs)) {
          subtitle = "a slope means z is partly counting voxels, not coherence",
          x = "usable voxels in ROI", y = "Rayleigh z", colour = NULL) +
     theme_minimal()
-  print(p4)
+#  print(p4)
 
 } else {
   message("No rayleigh_z column - skipping the spatial panels.")

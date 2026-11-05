@@ -20,7 +20,7 @@
 # ============================================================================
 
 # >>> 1. Which directory to import (one GLM output variant at a time).
-DATA_DIR <- "/Users/juli/Desktop/SOLIS/GLM_output_pmod_avg0_halves_thr08_prince_viarest_6f/"
+DATA_DIR <- "/Users/juli/Desktop/SOLIS/pmod_thr08_prince_unwarp1_smooth5_halves_avg1/"
 
 # >>> 2. Subject-level info (group, age, ...).
 #     A CSV with one row per subject. If it does not exist yet, the script
