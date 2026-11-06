@@ -45,6 +45,11 @@ fi
 
 # Defaults set here, not inline: a ${VAR:-{'x'}} default holding braces is
 # mis-parsed by the shell, and the MATLAB cell syntax is all braces.
+#
+# NAMES MUST NOT COLLIDE WITH config.sh. This script inherits the launcher's
+# exports and THEN sources config.sh, so a shared name is silently overwritten
+# by the config value. None of the names below collide today - check before
+# adding one.
 : "${WHAT:=both}"
 : "${SESSIONS_ARG:={'ses-01'}}"
 : "${MASK_DIR:=}"
