@@ -214,3 +214,104 @@ The tools are run whole-brain on purpose. If the field is structured in visual
 cortex but not in the ErC, the method works and the ErC is noisy. If it is
 structured nowhere, something upstream is wrong. Both are worth knowing and
 neither is visible from inside an ROI.
+
+---
+
+## Appendix: selecting ROI voxels on tSNR
+
+### Unsmoothed. The gain settles it.
+
+Smoothing raises tSNR by averaging away independent noise. At FWHM 5 mm on
+2 x 2 x 3.45 mm voxels the gain is **5.4x**, equivalent to averaging **~30
+voxels**:
+
+| FWHM | tSNR gain | effective voxels averaged |
+|---|---|---|
+| 4 mm | x3.7 | 14 |
+| **5 mm** | **x5.4** | **30** |
+| 6 mm | x7.3 | 53 |
+| 8 mm | x11.3 | 127 |
+
+pmErC is about **10 voxels per hemisphere** in this grid. A kernel whose
+variance-equivalent support is 30 voxels is wider than the structure, so a
+smoothed "ErC voxel" is mostly not ErC. Its tSNR is then a statement about how
+much tissue surrounds it — near the collateral sulcus, mostly distance to the
+nearest air — and not about the voxel.
+
+Two more reasons, either of which is enough on its own:
+
+- Smoothing makes neighbouring tSNR values nearly identical, so inside a
+  10-90 voxel ROI the ranking collapses. You end up selecting a contiguous blob
+  at the ROI's centre. That may be a reasonable thing to do, but it is a
+  *distance-to-edge* criterion, not a tSNR one, and should be called that.
+- Keep selection and analysis in the same space. Selecting on unsmoothed tSNR
+  and then analysing smoothed data means the number you selected on does not
+  describe the voxel you test.
+
+So: **select unsmoothed, analyse unsmoothed**, computed on the same
+preprocessing branch immediately before smoothing, with the GLM's high-pass
+(`HPF_SEC=128`, which `tsnr_report.sh` already applies - raw tSNR counts
+scanner drift as noise that the GLM removes anyway).
+
+### What to select on
+
+| criterion | safe? | the catch |
+|---|---|---|
+| `1/sqrt(ResMS)` (the `sens` map) | yes | the grid pmods are in GLM1's model, so a strong response very slightly lowers ResMS. Negligible against ~1000 df, and it is GLM1's half, not the half GLM2 tests. |
+| tSNR from the timeseries | yes | SD includes **task-driven** variance, so a strongly responding voxel reads *lower*. Also small, but it points the wrong way. |
+| `mean(beta_constant)/sqrt(ResMS)` | yes | best of both - normalises by the voxel's own mean, so coil sensitivity drops out. Read the constants by name from `SPM.xX.name`; `keep1` shifts their numbers. |
+| **amplitude** (`voxelwiseAmplitude_*`) | **NO** | direction-dependent. It is the thing GLM2 tests. Selecting on it is the circular move. |
+
+### Order of operations, and why it is this order
+
+`mthresh = 0.8` **is already a voxel filter, and a bad one** - it ranks voxels
+by absolute intensity, which is dominated by coil sensitivity, not by noise. It
+currently removes 50-87% of the ROI. So this is not about adding a filter; it
+is about replacing a bad one with a principled one.
+
+1. `mthresh = -Inf` - stop discarding voxels on brightness.
+2. Whole ErC as the ROI, pmErC as secondary.
+3. *Then* tSNR selection.
+
+Measured on `sub-01s17 ses-01`: pmErC is 10 + 8 = 18 voxels, of which **6**
+survive `mthresh = 0.8`. Taking the top half by tSNR of that leaves **3
+voxels**. Selection needs the mask fixed first or there is nothing to select
+from.
+
+### Pick the threshold on reproducibility, never on the contrast
+
+Sweep the percentile - keep the top 100, 75, 50, 25% - and at each step read a
+**direction-blind** reliability number: run-to-run spread of phi, or median
+`R-runs`. Does the orientation estimate become more repeatable as you tighten?
+
+- **A knee** means there is a real bad tail, and it says where to cut.
+- **Flat, or worse as n shrinks**, means there is nothing to select, and you
+  have learned that *without looking at the contrast* - no forking path spent.
+
+Only once the cut is fixed do you run GLM2, once. The contrast is
+`cos(6*dphi)` with a sign flip at 15 degrees, so sweeping thresholds and
+picking by contrast finds "significance" in noise reliably.
+
+### The pre-post trap
+
+Re-selecting voxels per session makes the ROI a different set of voxels in each
+session. Any session-to-session change in tSNR - shim, coil loading, motion -
+then masquerades as an intervention effect. Direction-blindness does not
+protect against this.
+
+- Use a **rank rule** (top k%), not an absolute threshold, so n is constant
+  across subjects and sessions. An absolute cut lets n vary and weights
+  subjects unequally.
+- Fix the set from **session 1** and carry it forward. The session affines
+  differ within a subject (verified), so this needs reslicing.
+- If you do re-select per session, **report the overlap** of the selected sets.
+  A low overlap means the session comparison is compromised, and that is worth
+  knowing before it becomes a result.
+
+### What is missing in the tooling
+
+`tsnr_report.sh` computes a per-voxel tSNR image at line 81 and then deletes it
+at the end of the function - it only keeps `roi_tsnr`, the ROI **mean**.
+Selection needs the image. Keeping it is a two-line change (an output path plus
+sparing `$tmp/tsnr.*` from the `rm`). Or skip it and use the `sens` map, which
+is already written per subject x session and needs nothing new.
