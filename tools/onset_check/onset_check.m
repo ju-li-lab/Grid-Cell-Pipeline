@@ -70,7 +70,7 @@ p.addParameter('MicrotimeRes',   16);
 p.addParameter('MicrotimeOnset', 9);
 p.addParameter('HPFSec',         128);
 p.addParameter('RangeTR',        5);
-p.addParameter('KeepPct',        2);
+p.addParameter('BrainThresh',    0.5);
 p.addParameter('PerSlice',       false);
 p.addParameter('SliceTiming',    []);   % vector of seconds, or a BOLD JSON path
 p.addParameter('OutDir',         '');
@@ -133,20 +133,20 @@ for si = 1:numel(subs)
             if o.PerSlice
                 st = slice_times(o.SliceTiming, dim(3));
                 for z = 1:dim(3)
-                    [dh, Fp, F0, nv] = sweep(Y(:, slice_idx(dim, z)), N, X, kRange, dt, o.KeepPct);
+                    [dh, Fp, F0, nv, ~, pr] = sweep(Y(:, slice_idx(dim, z)), N, X, kRange, dt, o.BrainThresh);
                     if nv == 0, continue; end
-                    rows{end+1} = {sub, ses, tk, z, st(z), nv, dh, Fp, F0};   %#ok<AGROW>
+                    rows{end+1} = {sub, ses, tk, z, st(z), nv, dh, Fp, F0, pr};   %#ok<AGROW>
                 end
                 fprintf('  %-11s %-7s task-%d  %d slices fitted\n', sub, ses, tk, dim(3));
             else
-                [dh, Fp, F0, nv, curve] = sweep(Y, N, X, kRange, dt, o.KeepPct);
+                [dh, Fp, F0, nv, curve, pr] = sweep(Y, N, X, kRange, dt, o.BrainThresh);
                 if nv == 0
                     fprintf('  %-11s %-7s task-%d  no usable voxels\n', sub, ses, tk);
                 else
-                    rows{end+1}   = {sub, ses, tk, NaN, NaN, nv, dh, Fp, F0}; %#ok<AGROW>
-                    curves{end+1} = curve;                                    %#ok<AGROW>
-                    fprintf('  %-11s %-7s task-%d  n=%5d  delta = %+6.3f s  F peak %8.2f  (F at 0: %8.2f)\n', ...
-                            sub, ses, tk, nv, dh, Fp, F0);
+                    rows{end+1}   = {sub, ses, tk, NaN, NaN, nv, dh, Fp, F0, pr}; %#ok<AGROW>
+                    curves{end+1} = curve;                                        %#ok<AGROW>
+                    fprintf('  %-11s %-7s task-%d  n=%6d  delta = %+6.3f s  F %6.2f  peak/median %5.2f%s\n', ...
+                            sub, ses, tk, nv, dh, Fp, pr, tern(pr < 1.3, '   <- flat, uninformative', ''));
                 end
             end
             clear Y X;
@@ -190,10 +190,20 @@ else
         csvwrite(fullfile(outDir, 'onset_check_curve.csv'), [kRange(:)*dt, m(:)]);
     end
     sd = NaN; if height(T) > 1, sd = std(T.delta_hat_s); end
+    pm = median(m(m > 0));
+    ppr = NaN; if ~isempty(pm) && pm > 0, ppr = max(m) / pm; end
     fprintf('\n  POOLED OVER %d RUNS\n', size(C,1));
     fprintf('    delta_hat = %+.3f s  =  %+.3f volumes\n', dh, dh/TR);
     fprintf('    per-run spread (sd) = %.3f s\n', sd);
-    if abs(dh/TR) < 0.35
+    fprintf('    pooled peak/median   = %.2f\n', ppr);
+    fprintf('    runs with a flat curve (peak/median < 1.3): %d of %d\n', ...
+            sum(T.peak_ratio < 1.3), height(T));
+    if ~(ppr > 1.3)
+        fprintf('\n    NO VERDICT. The pooled curve has no real peak, so delta_hat is\n');
+        fprintf('    where noise happened to be highest and means nothing. The task\n');
+        fprintf('    response is too weak in this series - see the README on what to\n');
+        fprintf('    try next. Do NOT read the number above as a timing result.\n');
+    elseif abs(dh/TR) < 0.35
         fprintf('    VERDICT: event time 0 is the first saved volume. No correction needed.\n');
     else
         fprintf('    VERDICT: offset by %+.2f volumes.\n', dh/TR);
@@ -255,46 +265,57 @@ end
 N = N(:, any(abs(N) > 0, 1));
 end
 
-function [dh, Fp, F0, nv, curve] = sweep(Y, N, X, kRange, dt, keepPct)
-dh = NaN; Fp = NaN; F0 = NaN; nv = 0; curve = [];
+function [dh, Fp, F0, nv, curve, pr] = sweep(Y, N, X, kRange, dt, brainThresh)
+% Mean F across EVERY in-brain voxel, at each shift. No voxel selection:
+% picking the top voxels by residual standard deviation selects motion-edge
+% and vessel voxels, not task-responsive ones, and on a partial slab that
+% left the curve flat. Averaging over all voxels is selection-free, so it
+% cannot be biased, and the dilution from unresponsive voxels costs far less
+% than a wrong selection did.
+dh = NaN; Fp = NaN; F0 = NaN; nv = 0; curve = []; pr = NaN;
 mu  = mean(Y, 1);
 pos = mu(mu > 0);
 if isempty(pos), return; end
-inb = mu > 0.2 * mean(pos);
-if sum(inb) < 20, return; end
+inb = mu > brainThresh * mean(pos);
+if sum(inb) < 200, return; end
 
-Y  = double(Y(:, inb));
-PN = pinv(N);
-R  = Y - N*(PN*Y);
-sd = std(R, 0, 1);
-ss = sort(sd);
-thr = ss(max(1, min(numel(ss), round(numel(ss) * (1 - keepPct/100)))));
-sel = sd >= thr;
-if sum(sel) < 10, return; end
-nv  = sum(sel);
-yr  = mean(R(:, sel), 2);
-syy = yr' * yr;
-if syy <= 0, nv = 0; return; end
+Yr  = Y(:, inb);
+PNs = single(pinv(N)); Ns = single(N);
+Yr  = Yr - Ns*(PNs*Yr);
+SYY = sum(double(Yr).^2, 1);
+ok  = SYY > 0;
+nv  = sum(ok);
+if nv < 200, nv = 0; return; end
+Yr  = Yr(:, ok); SYY = SYY(ok);
 
-rN = rank(N);
+PN  = pinv(N);
+rN  = rank(N);
 curve = zeros(1, numel(kRange));
 for j = 1:numel(kRange)
     Xr = X(:, :, j);
     Xr = Xr - N*(PN*Xr);
     q  = rank(Xr);
     if q == 0, continue; end
-    r   = yr - Xr*(pinv(Xr)*yr);
-    rss = r' * r;
-    dfe = numel(yr) - q - rN;
-    if rss <= 0 || dfe <= 0, continue; end
-    curve(j) = ((syy - rss)/q) / (rss/dfe);
+    dfe = size(Yr,1) - q - rN;
+    if dfe <= 0, continue; end
+    % ESS without forming any ns-by-nvox temporary: for the least squares fit,
+    % ||Xr*b||^2 = b' * (Xr' * Yr).
+    G   = double(single(Xr)' * Yr);
+    B   = pinv(Xr'*Xr) * G;
+    ESS = sum(B .* G, 1);
+    RSS = SYY - ESS;
+    g   = RSS > 0;
+    if ~any(g), continue; end
+    curve(j) = mean((ESS(g)/q) ./ (RSS(g)/dfe));
 end
 [Fp, i] = max(curve);
 F0 = curve(kRange == 0);
+med = median(curve(curve > 0));
+if ~isempty(med) && med > 0, pr = Fp / med; end
 dh = refine(kRange, curve, dt);
 if i == 1 || i == numel(kRange)
     warning('onset_check:EdgeOfRange', ...
-            'Peak sits at the edge of the shift range. Increase RangeTR.');
+            'Peak sits at the edge of the shift range. The curve has no interior maximum.');
 end
 end
 
@@ -334,6 +355,10 @@ end
 function idx = slice_idx(dim, z)
 [a, b] = ndgrid(1:dim(1), 1:dim(2));
 idx = sub2ind(dim, a(:), b(:), repmat(z, numel(a), 1));
+end
+
+function out = tern(c, a, b)
+if c, out = a; else, out = b; end
 end
 
 function out = list_dirs(root, pat, keep)

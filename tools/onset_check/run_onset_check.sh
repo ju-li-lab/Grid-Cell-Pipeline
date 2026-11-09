@@ -29,7 +29,8 @@
 #    --t0 N          microtime onset. Default 9 (exactly 0.5 x TR at 16 bins)
 #    --tr SEC        repetition time. Default read from spm_options.m
 #    --range N       sweep +/- N TR. Default 5
-#    --keep PCT      share of voxels kept, by residual SD. Default 2
+#    --brain PCT     in-brain threshold as a fraction of the mean signal.
+#                    Default 0.5. No voxel selection happens beyond this.
 #    --per-slice     fit one curve per slice on a series with NO slice timing
 #                    correction, to confirm the offset without assuming the
 #                    SliceTiming vector. Needs --json.
@@ -47,7 +48,7 @@ ROOT_DIR="$(cd "${SELF_DIR}/../.." && pwd)"
 CONFIG_FILE="${ROOT_DIR}/config.sh"
 
 EVENTS=""; DERIV=""; PREFIX=""; SESSIONS=""; TASKS="1,2,3"
-T0=9; RANGE=5; KEEP=2; PERSLICE="false"; JSON=""; OUT=""; TR_VAL=""
+T0=9; RANGE=5; BRAIN=0.5; PERSLICE="false"; JSON=""; OUT=""; TR_VAL=""
 SUBS=()
 
 while [[ $# -gt 0 ]]; do
@@ -61,7 +62,7 @@ while [[ $# -gt 0 ]]; do
         --t0)        T0="$2";       shift 2 ;;
         --tr)        TR_VAL="$2";   shift 2 ;;
         --range)     RANGE="$2";    shift 2 ;;
-        --keep)      KEEP="$2";     shift 2 ;;
+        --brain)     BRAIN="$2";    shift 2 ;;
         --per-slice) PERSLICE="true"; shift ;;
         --json)      JSON="$2";     shift 2 ;;
         --out)       OUT="$2";      shift 2 ;;
@@ -164,7 +165,7 @@ matlab -nodisplay -nosplash -r "\
             'TR', ${TR_VAL}, \
             'MicrotimeOnset', ${T0}, \
             'RangeTR', ${RANGE}, \
-            'KeepPct', ${KEEP}, \
+            'BrainThresh', ${BRAIN}, \
             'PerSlice', ${PERSLICE}, \
             'SliceTiming', ${st_arg}, \
             'OutDir', '${OUT}'); \

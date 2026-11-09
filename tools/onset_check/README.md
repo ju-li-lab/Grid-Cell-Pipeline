@@ -51,37 +51,54 @@ corrected_onset = onset - delta_hat
 | ~ +4.12 | two were. |
 | ~ −2.06 | the onsets sit one volume late. Add 2.06 s. |
 
-## How much to trust it
+## How much to trust it — read this before the number
 
-Measured on simulated data built from a real s17 event file, with AR(1) noise
-and the same high-pass the GLM uses. The estimator is the one the tool uses:
-normalise each run's F curve, average the curves, then interpolate the peak.
+Simulated from a real s17 event file with AR(1) noise and the same high-pass
+the GLM uses, using the tool's own estimator (normalise each run's curve,
+average the curves, interpolate the peak), 54 runs per repeat:
 
-| true offset | model R² | recovered | sd over 30 repeats |
-|---|---|---|---|
-| 0 | 0.05 | +0.035 | 0.185 |
-| 0 | 0.12 | −0.022 | 0.060 |
-| +2.06 (1 volume) | 0.05 | +2.050 | 0.135 |
-| +2.06 | 0.12 | +2.065 | 0.058 |
-| +4.12 (2 volumes) | 0.12 | +4.139 | 0.084 |
-| −2.06 | 0.12 | −2.080 | 0.054 |
+| model R² | median F peak | per-run sd | pooled over 54 | pooled sd |
+|---|---|---|---|---|
+| 0.015 | 4.9 | 6.1 s | +0.22 | **1.99 s** |
+| 0.02 | 4.7 | 5.9 s | +0.58 | **1.95 s** |
+| 0.05 | 4.7 | 5.0 s | −0.06 | **0.095 s** |
+| 0.12 | 8.2 | 2.9 s | −0.02 | **0.053 s** |
 
-Unbiased, and it separates zero from one volume by more than ten standard
-deviations. A single run is *not* decisive — per-run spread is about 1.5 s at
-R² = 0.12 — which is exactly why the pooled curve is the headline number and
-the per-run column is only there to show consistency.
+There is a cliff between R² = 0.02 and R² = 0.05. Above it the pooled estimate
+is good to a tenth of a second and settles the question outright. Below it the
+pooled estimate is worthless — a 2 s standard deviation on a 2.06 s question.
 
-**What it cannot do.** The precision above is statistical. The *accuracy* is
-limited to roughly ±1 s by the canonical HRF assumption, because the real
-response in the selected voxels may peak earlier or later than the canonical
-shape and the test cannot separate that from a clock offset. So this settles
-whole-volume offsets beyond argument and says nothing useful about
-`microtimeOnset = 8` versus `9` — a 0.129 s question that does not matter.
-Read any `delta_hat` within ±1 s of zero as zero.
+**`F_peak` cannot tell you which side you are on.** At R² = 0.02 the median
+F peak is 4.7; at R² = 0.05 it is also 4.7, because at low signal the peak is
+just the largest of 161 noise draws. The statistic that discriminates is
+`peak_ratio` — the peak divided by the median of the curve. A curve with a real
+bump has `peak_ratio` well above 1.3; a flat curve sits near 1.0 wherever its
+maximum happens to land. The tool prints it per run, prints the pooled value,
+and **refuses to give a verdict when the pooled curve is flat** rather than
+reporting a meaningless number.
 
-If `F_peak` comes back below about 5, the visual response is too weak for the
-run to contribute; check that `--prefix` really points at a preprocessed series
-and that `--keep` is not so small that only a handful of voxels survive.
+## If the curve comes back flat
+
+The first version of this tool averaged the top 2% of voxels by residual
+standard deviation. On a partial slab that selects motion-edge and vessel
+voxels, not task-responsive ones, and it produced flat curves with peaks
+scattered across the whole search range. It now takes the mean F across every
+in-brain voxel instead — selection-free, so it cannot be biased, and the
+dilution from unresponsive voxels costs far less than a wrong selection did.
+
+If it is still flat, in order of effort:
+
+1. **Check the field of view.** The whole method assumes the task drives visual
+   cortex, and this is an entorhinal-targeted slab. If occipital cortex is not
+   covered, there is no strong visual response to find and no amount of
+   statistics will invent one.
+2. **Use the optic-flow regressors.** The raw Unity logs carry `Position` and
+   `Rotation` on every frame, so angular and linear speed can be reconstructed
+   at roughly 60 Hz. A continuous speed regressor is far stronger than three
+   boxcars, because rotate-versus-translate is only a modest differential
+   contrast — both are optic flow. This needs the logs on the cluster.
+3. **Fall back to metadata.** The DICOM instance count against the protocol's
+   planned measurements answers the same question without any model.
 
 ## Running it
 
@@ -106,7 +123,8 @@ anything holding `*EventData.txt` anywhere below `GLM_runauto`. The banner
 prints the directory it settled on and how many tables are in it — check that
 count matches the number of runs you expect. `--events DIR` overrides it.
 
-`--help` lists every option.
+`--help` lists every option. There is no voxel-selection option any more;
+`--brain` only sets the in-brain intensity threshold.
 
 ## The independent confirmation
 
