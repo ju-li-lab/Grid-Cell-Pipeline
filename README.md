@@ -161,10 +161,14 @@ can stop after any of them, inspect or replace the intermediate files, and resum
 |---|---|---|
 | `topup` | FSL topup distortion field | `func/topup_results_*` |
 | `vdm` | one voxel displacement map per task | `func/vdm_task-<N>.nii` |
-| `slicetime` | shift every slice to the same point in the TR | `a*_bold.nii` |
+| `slicetime` | shift every slice to the same point in the TR | `a*_bold.nii` or `au*_bold.nii` |
 | `realign` | apply the correction + motion correction | `u*_bold.nii`, `rp_*.txt`, `meanu_session.nii` |
 | `coreg` | T2w → session mean, reslice the ROIs | `anat/r*_mask.nii` |
 | `smooth` | Gaussian smoothing | `func/su*_bold.nii` |
+
+`slicetime` sits on whichever side of `realign` `SLICETIME_ORDER` names; the
+other four never move. Listing stages in a different order changes nothing —
+they always run in the sequence above.
 
 Set the default in `PREPROC_STAGES`, or override per submission:
 
@@ -174,7 +178,8 @@ bash submit_preproc.sh --stages realign,coreg,smooth       # resume from ready-m
 bash submit_preproc.sh --stages smooth                     # just re-smooth
 ```
 
-Shorthands: `all`, `fieldmap` (= topup,vdm), `post_fieldmap` (= slicetime,realign,coreg,smooth), `stc` (= slicetime).
+Shorthands: `all`, `fieldmap` (= topup,vdm), `post_fieldmap` (= everything after
+the fieldmap stages), `stc` (= slicetime).
 
 ### Slice timing
 
@@ -189,23 +194,70 @@ middle). That has to agree with the GLM: SPM samples the design matrix at
 `microtimeOnset = microtimeResolution/2`. The stage checks the pair and warns
 if you change one without the other.
 
-Turning it on changes which files every later stage reads, because the
-corrected ones carry `SLICETIME_PREFIX`:
+#### Before or after realignment
 
-| | prefix |
-|---|---|
-| plain | `u` |
-| `SMOOTH_FWHM>0` | `su` |
-| `DO_SLICE_TIMING=1` | `ua` |
-| both | `sua` |
+`SLICETIME_ORDER` in `config.sh` decides where the correction sits:
+
+| | pipeline | realignment sees |
+|---|---|---|
+| `before` (default) | raw → `a*_bold.nii` → `ua*_bold.nii` | slice-time corrected data |
+| `after` | raw → `u*_bold.nii` → `au*_bold.nii` | the untouched EPI |
+
+There is no settled answer, which is why it is a switch rather than a decision
+baked into the code.
+
+**For `before`:** the slice times describe when each *slice* was acquired. Once
+realignment has resliced the data, a voxel's time course is a blend of
+neighbouring slices acquired at different times, so correcting afterwards
+applies a per-slice shift to data whose slice identity has already been
+smeared.
+
+**For `after`:** shifting in time before the motion estimate means the estimate
+is made partly on interpolated data. With a long slice span relative to the TR
+— 30 slices over 1.97 s of a 2.06 s TR here — a through-plane movement is
+spread across slices before anything has measured it.
+
+The second argument bites hardest exactly where the grid analysis lives. The
+entorhinal cortex sits at the edge of the slab, where through-plane motion and
+the unwarping both act most strongly, so running both orders and comparing them
+is worth the disk space. Both are correct SPM usage.
+
+#### The prefix
+
+Turning slice timing on changes which files every later stage reads, because
+the corrected ones carry `SLICETIME_PREFIX`, and `SLICETIME_ORDER` decides
+which side of `RESLICE_PREFIX` it lands on — SPM prepends, so the letters stack
+in the order the stages ran:
+
+| | `before` | `after` |
+|---|---|---|
+| `DO_SLICE_TIMING=0` | `u` | `u` |
+| `DO_SLICE_TIMING=0`, `SMOOTH_FWHM>0` | `su` | `su` |
+| `DO_SLICE_TIMING=1` | `ua` | `au` |
+| both | `sua` | `sau` |
 
 That is derived, never stored — `func_prefix()` in `bids_common.sh` for the
-shell side and the same rule in `run_gridcat_analysis.m`. So after changing it,
-re-run from `slicetime` onwards:
+shell side, and the same rule in `run_spm_preproc.m` (as `CFG.BOLD_PREFIX`) and
+`run_gridcat_analysis.m`. Nothing else has to change when you flip the switch:
+smoothing and the GridCAT preparation pick up the right series on their own.
+
+After changing `DO_SLICE_TIMING`, re-run from `slicetime` onwards:
 
 ```bash
 bash submit_preproc.sh --stages slicetime,realign,coreg,smooth
 ```
+
+After changing `SLICETIME_ORDER`, both operations have to be redone, so re-run
+everything past the fieldmap. The shorthand expands in the right sequence for
+whichever order is set, so it is the same command either way:
+
+```bash
+bash submit_preproc.sh --stages post_fieldmap
+```
+
+Keep the two orders in separate trees (`DERIV_ROOT`) or separate
+`RUN_VARIANT`s. A tree holding both `uasub-*` and `ausub-*` is a tree where you
+cannot tell which one an analysis used.
 
 ---
 

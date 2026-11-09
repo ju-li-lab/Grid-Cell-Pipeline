@@ -28,6 +28,24 @@ function vdm_out = make_vdm(data, epiRef, funcDir, fmapDir, CFG, taskLabel)
 vdmSearchDirs = {funcDir, fmapDir, pwd};
 before = list_vdm_candidates(vdmSearchDirs);
 
+% ---- And the unwarped sample this is about to write over ----
+% matchvdm=1 makes the FieldMap toolbox write one unwarped sample volume,
+% named u<the EPI it matched against>. Nothing in this pipeline reads it, and
+% that is exactly the name Realign & Unwarp gives its own output whenever
+% slice timing has not renamed its input first (SLICETIME_ORDER=after, or
+% DO_SLICE_TIMING=0). So the sample is removed below rather than left to
+% collide - and if a finished 4D series was sitting under that name, this run
+% has just destroyed it and says so.
+samplePath   = unwarped_sample_path(epiRef);
+sampleWas4D  = false;
+if isfile(samplePath)
+    try
+        sampleWas4D = numel(spm_vol(samplePath)) > 1;
+    catch
+        sampleWas4D = false;
+    end
+end
+
 % ---- Build the FieldMap batch ----
 matlabbatch = {};
 
@@ -93,6 +111,27 @@ end
 
 fprintf('VDM (task-%s) -> %s\n', taskLabel, vdm_out);
 
+% ---- Drop the unwarped sample ----
+if isfile(samplePath)
+    if sampleWas4D
+        warning('make_vdm:OverwroteRealignedBold', [ ...
+            'The FieldMap toolbox wrote its unwarped sample over\n  %s\n' ...
+            'which held a multi-volume series - Realign & Unwarp''s output for\n' ...
+            'task-%s. Re-run the "realign" stage (and anything after it).'], ...
+            samplePath, taskLabel);
+    end
+    delete(samplePath);
+end
+end
+
+
+function p = unwarped_sample_path(epiRef)
+% UNWARPED_SAMPLE_PATH  Where the FieldMap toolbox writes its unwarped sample.
+%
+% SPM prepends a literal 'u' to the EPI it matched the VDM against - its own
+% constant, not RESLICE_PREFIX. epiRef carries a ',1' volume index.
+[d, n, e] = fileparts(regexprep(epiRef, ',\d+$', ''));
+p = fullfile(d, ['u' n e]);
 end
 
 

@@ -15,7 +15,7 @@
 #
 #  WHAT IT REMOVES
 #    func/  <u>sub-*_bold*.nii  <su>sub-*_bold*.nii  *_bold_dc.nii
-#           rp_sub-*.txt  mean*sub-*.nii  vdm_*  vdm5_*  topup_*
+#           rp_*sub-*.txt  mean*sub-*.nii  vdm_*  vdm5_*  topup_*
 #           fieldmap_hz.nii  preproc_provenance.json  preproc_stages.log
 #    anat/  <r>sub-*.nii — the masks the coregistration resliced
 #    any/   a .nii that has a .nii.gz of the same name beside it
@@ -123,6 +123,9 @@ trap 'rm -f "$TMP" "${TMP}.gz" "${TMP}.keep"' EXIT
 # The prefixes come from the config, and every one of them is followed by
 # "sub-". Without that anchor "su*_bold*.nii" matches the raw
 # sub-01_ses-01_task-run1_bold.nii, because a BIDS name starts with "sub-".
+# Both slice-timing orders are listed (ua/sua and au/sau) rather than read
+# from SLICETIME_ORDER: a tree being cleaned up may hold either, and the
+# config that made it is not necessarily the config sitting here now.
 U_PREFIX="${RESLICE_PREFIX:-u}"
 S_PREFIX="${SMOOTH_PREFIX:-s}"
 R_PREFIX="${ROI_PREFIX:-r}"
@@ -135,8 +138,10 @@ find "$SCOPE" -type d -name func -print0 2>/dev/null | while IFS= read -r -d '' 
         -name "${A_PREFIX}sub-*_bold*.nii"                       -o \
         -name "${U_PREFIX}${A_PREFIX}sub-*_bold*.nii"            -o \
         -name "${S_PREFIX}${U_PREFIX}${A_PREFIX}sub-*_bold*.nii" -o \
+        -name "${A_PREFIX}${U_PREFIX}sub-*_bold*.nii"            -o \
+        -name "${S_PREFIX}${A_PREFIX}${U_PREFIX}sub-*_bold*.nii" -o \
         -name "*_bold_dc.nii"                         -o \
-        -name "rp_sub-*.txt"                          -o \
+        -name "rp_*sub-*.txt"                         -o \
         -name "mean${U_PREFIX}sub-*.nii"              -o \
         -name "mean${U_PREFIX}${A_PREFIX}sub-*.nii"   -o \
         -name "meansub-*.nii"                         -o \

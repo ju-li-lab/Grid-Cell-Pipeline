@@ -6,6 +6,12 @@ function outFiles = slice_time_correct(boldFiles, CFG)
 % Returns the corrected files (the same names with SLICETIME_PREFIX in
 % front). Runs with no BOLD are passed through as empty.
 %
+% boldFiles is the raw staged BOLD with SLICETIME_ORDER=before and
+% realignment's output with SLICETIME_ORDER=after. Nothing here changes
+% between the two: the correction is in time only, so it does not care
+% whether the series has been resliced, and the slice times come from the
+% sidecar of the file the series descends from (see find_sidecar).
+%
 % WHY THE TIMES AND NOT THE ORDER
 % -------------------------------
 % SPM accepts either a slice ORDER (1:30, 30:-1:1, an interleaved vector)
@@ -87,8 +93,8 @@ end
 
 function [st_s, nslices] = read_slice_timing(boldFile)
 % SliceTiming in seconds, from the sidecar that bids_stage copied along.
-jsonFile = regexprep(boldFile, '\.nii(\.gz)?$', '.json');
-assert(isfile(jsonFile), [ ...
+jsonFile = find_sidecar(boldFile);
+assert(~isempty(jsonFile), [ ...
     'slice_time_correct: no JSON sidecar for\n  %s\n' ...
     'Slice timing needs SliceTiming from the sidecar. Either the staging\n' ...
     'did not copy it, or the BIDS conversion did not write it.'], boldFile);
@@ -138,6 +144,38 @@ if G.microtimeOnset ~= want
         frac, want, frac, G.microtimeResolution, G.microtimeOnset);
 else
     fprintf('    microtimeOnset %d matches the reference point.\n', G.microtimeOnset);
+end
+end
+
+
+function jsonFile = find_sidecar(boldFile)
+% FIND_SIDECAR  The BIDS sidecar belonging to a BOLD file, or ''.
+%
+% With SLICETIME_ORDER=after the input is realignment's output, which carries
+% RESLICE_PREFIX and in topup+applytopup mode a _dc suffix as well. SPM wrote
+% those names; nobody wrote a sidecar to match. So fall back to the name the
+% staged original has: a BIDS filename starts at 'sub-', and the suffix the
+% sidecar describes is _bold.
+jsonFile = '';
+[d, n] = fileparts(boldFile);
+
+cands = { [n '.json'] };
+
+k = strfind(n, 'sub-');            % drop whatever SPM prepended
+if ~isempty(k) && k(1) > 1
+    cands{end+1} = [n(k(1):end) '.json'];
+end
+
+for i = 1:numel(cands)             % and applytopup's _dc copy
+    cands{end+1} = regexprep(cands{i}, '_bold_dc\.json$', '_bold.json'); %#ok<AGROW>
+end
+
+for i = 1:numel(cands)
+    p = fullfile(d, cands{i});
+    if isfile(p)
+        jsonFile = p;
+        return;
+    end
 end
 end
 

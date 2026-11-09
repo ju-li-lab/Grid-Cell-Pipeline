@@ -24,8 +24,8 @@
 #
 #  Options:
 #    --stages LIST   Stages to run (default: PREPROC_STAGES from the config).
-#                    One or more of: topup, vdm, realign, coreg, smooth
-#                    Shorthands: all, fieldmap, post_fieldmap
+#                    One or more of: topup, vdm, slicetime, realign, coreg,
+#                    smooth. Shorthands: all, fieldmap, post_fieldmap, stc
 #    --sub SUB       Process a single subject...
 #    --ses SES       ...and this session (both required together).
 #    --local         Run here in the foreground instead of submitting to SLURM.
@@ -118,14 +118,18 @@ LIST_DIR="${PIPELINE_DIR:-$SELF_DIR}"
 STAGES="${STAGES// /}"
 
 # ---- Validate the stage names before anything is submitted ----
-VALID_STAGES="topup vdm realign coreg smooth all fieldmap fieldmaps fmap post_fieldmap postfieldmap post-fieldmap unwarp realign_unwarp"
+# Kept in step with resolve_stages() in matlab/run_spm_preproc.m, which is
+# what actually runs them. Where 'slicetime' sits relative to 'realign' is
+# SLICETIME_ORDER's business, not this list's: every stage name is valid in
+# either order, and MATLAB puts them in the right sequence.
+VALID_STAGES="topup vdm slicetime stc slice_timing slice-timing realign coreg smooth all fieldmap fieldmaps fmap post_fieldmap postfieldmap post-fieldmap unwarp realign_unwarp"
 IFS=',' read -ra _stage_parts <<< "$STAGES"
 for _s in "${_stage_parts[@]}"; do
     [[ -z "$_s" ]] && continue
     if [[ ! " ${VALID_STAGES} " == *" ${_s} "* ]]; then
         echo "ERROR: Unknown stage: '${_s}'" >&2
-        echo "       Valid stages: topup, vdm, realign, coreg, smooth" >&2
-        echo "       Shorthands:   all, fieldmap, post_fieldmap" >&2
+        echo "       Valid stages: topup, vdm, slicetime, realign, coreg, smooth" >&2
+        echo "       Shorthands:   all, fieldmap, post_fieldmap, stc" >&2
         exit 1
     fi
 done

@@ -110,20 +110,29 @@ require_command() {
 # SMOOTH_PREFIX on top of that when smoothing runs. Keeping this as its
 # own config key meant it could disagree with what SPM had written, and
 # it did.
-#   plain                             -> u
-#   SMOOTH_FWHM>0                     -> su
-#   DO_SLICE_TIMING=1                 -> ua
-#   DO_SLICE_TIMING=1, SMOOTH_FWHM>0  -> sua
+# SLICETIME_ORDER decides which side the slice-timing letter lands on,
+# because SPM prepends in the order the stages ran:
+#   plain                                      -> u
+#   SMOOTH_FWHM>0                              -> su
+#   DO_SLICE_TIMING=1, SLICETIME_ORDER=before   -> ua
+#   DO_SLICE_TIMING=1, SLICETIME_ORDER=after    -> au
+#   both, before / after                        -> sua / sau
 func_prefix() {
     local reslice="${RESLICE_PREFIX:-u}" smooth="${SMOOTH_PREFIX:-s}"
     local stc="${SLICETIME_PREFIX:-a}"
     local fwhm="${SMOOTH_FWHM:-0}" dostc="${DO_SLICE_TIMING:-0}"
+    local order="${SLICETIME_ORDER:-before}"
 
     # SPM prepends, so the prefixes stack inwards-out in stage order:
     #   raw -> a (slice timing) -> u (reslice) -> s (smooth)  =>  "sua"
+    #   raw -> u (reslice) -> a (slice timing) -> s (smooth)  =>  "sau"
     local p="$reslice"
     if [[ "$dostc" == "1" || "$dostc" == "true" ]]; then
-        p="${p}${stc}"
+        if [[ "$order" == "after" ]]; then
+            p="${stc}${reslice}"
+        else
+            p="${reslice}${stc}"
+        fi
     fi
     # Non-zero and non-empty means smoothing ran. Compared as a string so
     # a decimal like 2.5 works without needing bc.

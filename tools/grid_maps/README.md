@@ -36,6 +36,9 @@ cross-session number there mixes measurement reliability with a real effect.
 Stop at the first one that is empty. If there is no ROI left (1), nothing below
 it means anything.
 
+**Section 8 is the cheat-sheet for reading them:** what brighter and darker
+actually mean in each image, and the four different kinds of number involved.
+
 ---
 
 ## 1. `roi-kept_<hemi>_<label>.nii`
@@ -391,9 +394,11 @@ columns gives you in SPM.
 Two things make it the right map for this question. It is **orientation-free**:
 it asks whether *any* 6-fold modulation is present, not whether the grid points
 a particular way, so you do not have to trust phi to read it. And each
-component is divided by **its own** variance, which matters here because the
-sin and cos columns are not equally estimable (variance ratio ~1.35 in runs 1
-and 3).
+component is divided by **its own** variance, which is the correct way to build
+the statistic. In this session it changes almost nothing: *per run* the two
+columns differ by up to ~1.4, but summed over the three counterbalanced routes
+the imbalance very nearly cancels (sum Vss 0.3311 vs sum Vcc 0.3293, ratio
+0.995).
 
 **How to read it.** For F(2, 969): the null **median is 0.694**, the null mean
 is 1.00, and p < 0.05 uncorrected is **F > 3.01**. Measured in princeErC,
@@ -401,11 +406,11 @@ sub-01s17 ses-01:
 
 | | value |
 |---|---|
-| median F | **0.42** (null median 0.69) |
-| 90th percentile | 1.96 |
-| max | 4.47 |
-| ErC voxels at p < 0.05 | **3 of 93** (4.7 expected by chance) |
-| whole brain at p < 0.05 | **3.9%** (5.0% expected by chance) |
+| median F | **0.48** (null median 0.69) |
+| 90th percentile | 1.71 |
+| max | 3.53 |
+| ErC voxels at p < 0.05 | **2 of 93** (4.7 expected by chance) |
+| whole brain at p < 0.05 | **4.0%** (5.0% expected by chance) |
 
 So the fit is at chance or just under it, in the ErC and everywhere else. That
 is the honest headline, and it is what you would want to know before tuning
@@ -420,7 +425,7 @@ and never select voxels on it.
 ### `pct-grid` — the same thing in physiological units
 
 ```
-pct-grid = 100 * A_allRunsAvg / mean(beta_constant)
+pct-grid = 100 * hypot(sum b_cos, sum b_sin) / nRuns / mean(beta_constant)
 ```
 
 The size of the fitted grid modulation as a **percentage of the voxel's own
@@ -430,9 +435,15 @@ voxel's brightness, so a dim ErC voxel and a bright one are on the same scale.
 (Within a single voxel there is nothing to weight — GridCAT's amplitude
 weighting is for *combining* voxels, not for making a map.)
 
-Measured in princeErC: **median 2.72%**, 90th percentile 5.6%, max 11.3%. Note
+The amplitude here is the **coherent** one: the length of the across-run mean
+vector, built from the same summed betas `F-grid` uses, so the two maps are
+answering about the same thing. It is not the average of the three per-run
+amplitudes, which is larger (2.72% here against 1.47%) because it keeps
+modulation whose direction changes from run to run.
+
+Measured in princeErC: **median 1.47%**, 90th percentile 2.63%, max 6.73%. Note
 how implausible that is for a real BOLD effect — a genuine entorhinal task
-response is a few tenths of a percent. A 2.7% "modulation" is the signature of
+response is a few tenths of a percent. A 1.5% "modulation" is the signature of
 a quantity made of noise, and it agrees with the independent finding that
 amplitude is 97-99% noise.
 
@@ -448,3 +459,88 @@ tsnr-glm = mean(beta_constant) / sqrt(ResMS)
 A GLM-native tSNR. Use this, not `sens`, whenever you want a sensitivity
 number: `sens` is `1/sqrt(ResMS)` with no mean normalisation and therefore
 tracks inverse intensity (see section 2).
+
+---
+
+## 8. What brighter and darker mean, image by image
+
+A NIfTI image is just a number per voxel. Your viewer turns numbers into grey
+levels by picking a window — a lowest value shown as black and a highest shown
+as white — and **it picks that window itself**, usually from the minimum and
+maximum in the file. So "bright" never has a fixed meaning across two images,
+and a map can look dramatic only because one outlier voxel stretched the scale.
+Always read the number under the cursor before believing a picture.
+
+Beyond that, these images do not all use the same *kind* of number. There are
+four kinds, and mixing them up is the main way to misread a map:
+
+1. **More-is-more scales.** Zero means none, bigger means more. `sens`,
+   `tsnr-glm`, `F-grid`, `pct-grid`, `clust-size`, `n-runs`, `n-local`.
+   Brightness is meaningful and darkness means "little or nothing".
+2. **Signed scales.** Zero sits in the middle and negative is as meaningful as
+   positive. `beta_*`, `con_*`, `spmT_*`. Here a dark voxel can be a *strong*
+   effect pointing the other way. Window these symmetrically about zero, or you
+   will read half the brain backwards.
+3. **Circular scales.** The number is an angle that wraps around. `*GridOri*`,
+   `clust-ori`. 59° and 1° are 2° apart but land at opposite ends of a grey
+   scale, so **brightness carries no information at all** and a sharp
+   black-to-white edge can mean no change whatsoever. Only read these through a
+   cyclic colour map, or through `nbr-dev`, which converts them to a distance.
+4. **Label scales.** The number is a name, not a quantity. `clust-label`,
+   `mask`, `roi-kept`. A brighter voxel is not "more" of anything.
+
+And one more distinction: these tools write **NaN** where a voxel has no valid
+estimate, which viewers draw as transparent or black, while a real **0** means
+a measured zero. Dark can therefore mean "not computed" or "computed, and it is
+zero". The `nan%` is 10.4% of the volume in a `thr00` GLM — that is the air.
+
+### The images GridCAT and SPM write
+
+| image | the number in each voxel | bright means | dark means |
+|---|---|---|---|
+| `beta_0001.nii` … | the weight the GLM gave **one** design column, in intensity units | that column's shape fits with a large positive weight | **signed** — near zero is no response, negative is a response the other way |
+| `ResMS.nii` | variance of the unexplained leftover (noise power) | noisy **or simply bright** — noise grows with signal level, so this largely maps intensity; CSF and vessels light up | quiet, or just a dim voxel / air |
+| `mask.nii` | 1 or 0 | the voxel was analysed | the voxel was dropped by the implicit mask. **This is the image that shows the ErC loss** |
+| `RPV.img` | resels per voxel: how locally smooth the residuals are | locally smoother data | locally rougher. Machinery for cluster correction — never read it anatomically |
+| `con_*.nii` | a weighted sum of betas, in intensity units | effect in the contrast's direction | **signed.** And GLM2's `con_0004` sums three runs, so it is on a 3× scale |
+| `spmT_*.nii` | that contrast divided by **its own** standard error | a confident positive effect | near zero is no evidence, negative is a confident opposite effect. Bright does not mean big — it means big *for this voxel's noise*, so a dim noisy voxel can outshine a strong clean one |
+| `voxelwiseGridOri_*_deg.nii` | fitted grid orientation, 0–60° | **nothing — circular.** See kind 3 above | **nothing** |
+| `voxelwiseAmplitude_*.nii` | `sqrt(b_sin² + b_cos²)`, length of the fitted 6-fold vector | a bigger fitted modulation — but measured here amplitude is 97–99% noise magnitude, so in practice bright means **noisy**, and it tracks `ResMS` | a quiet or dim voxel |
+
+### The maps `grid_maps` writes
+
+| map | the number | bright means | dark means | the anchor that matters |
+|---|---|---|---|---|
+| `roi-kept` | 0 / 1 / 2 (a label) | 2 = ROI voxel with an estimate | 1 = ROI voxel the GLM threw away, 0 = outside the ROI | any 1 at all is ErC you lost |
+| `sens` | `1/sqrt(ResMS)` | low noise — which in practice means a **dim** voxel | high noise — which means a bright voxel | inverse intensity; fine to look at, wrong to select on |
+| `tsnr-glm` | `mean / sqrt(ResMS)` | genuinely sensitive tissue | dropout | ~11 whole-brain, 11–17 in unsmoothed ErC |
+| `n-runs` | 0–3 | all three runs gave an estimate | fewer | read this *before* `R-runs`; 2 runs and 3 runs are not comparable |
+| `R-runs` | 0–1, run-to-run orientation agreement | every run points the same way | the runs cancel | **chance is 0.52 at n=3, not 0** (median 0.49). Measured ErC median is 0.47 — below chance |
+| `R-runs-w` | the same, amplitude-weighted | — | — | chance 0.58. Weighting by amplitude weights by noise, so prefer `R-runs` |
+| `coh-local` | 0–1, agreement inside the radius | the neighbourhood shares an orientation | it does not | chance falls as `1/sqrt(n-local)`, so it is not comparable between a deep voxel and an edge one |
+| `z-local` | `n × coh²` (Rayleigh's z) | strong local agreement | none | **≈1 is chance, >3 is roughly p<0.05** for one neighbourhood |
+| `n-local` | how many valid neighbours were in the sphere | a deep voxel, estimate stable | an edge or dropout voxel, estimate unstable | z grows with n; always check this beside `z-local` |
+| `F-grid` | F on 2 and erdf df: fitted 6-fold modulation over this voxel's noise | the grid model fits well *relative to noise* | it does not | **null median 0.69, null mean 1.00, p<0.05 at 3.01.** ErC median 0.48 |
+| `pct-grid` | the coherent modulation as % of the voxel's own mean | a large modulation | a small one | a real entorhinal response is a few **tenths** of a percent, so anything above ~1% is a noise signature. ErC median 1.47% |
+
+### The maps `grid_clusters` writes
+
+| map | the number | bright means | dark means | the anchor |
+|---|---|---|---|---|
+| `nbr-dev` | mean angular distance to the six face neighbours, 0–30° | neighbours **disagree** | neighbours **agree** | **this one is inverted — dark is the good news.** 15° is exactly chance, 0° identical, 30° maximally opposed |
+| `clust-label` | an arbitrary cluster id (a label) | nothing: a high id, assigned in discovery order | nothing | use a random/qualitative colour map, never a grey ramp |
+| `clust-size` | how many voxels are in this voxel's cluster | a large connected chain | an isolated voxel | **one huge bright cluster is percolation, not signal.** Keep the tolerance under ~7° |
+| `clust-ori` | the cluster's mean orientation, 0–60° | **nothing — circular** | **nothing** | read `nbr-dev` instead |
+
+### The two traps worth repeating
+
+**Smoothed data poisons every agreement map.** `nbr-dev`, `coh-local`,
+`z-local` and the cluster maps all ask whether neighbouring voxels agree.
+Smoothing makes them share signal by construction, so on smoothed data these
+maps go dark (or huge) everywhere and are measuring the kernel. Run them
+unsmoothed.
+
+**Darkness is not always bad news and brightness is not always good news.**
+In `sens` bright means noisy. In `nbr-dev` dark means agreement. In `spmT_*`
+dark can mean a strong opposite effect. There is no single rule — check which
+of the four kinds of scale you are looking at.

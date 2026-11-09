@@ -228,16 +228,21 @@ for s = 1:numel(uSubs)
                 % F on the SUMMED sin/cos betas, df (2, erdf). Asks: is there
                 % a 6-fold modulation here, with ONE orientation shared across
                 % runs, bigger than this voxel's own noise? Orientation-free -
-                % it does not care WHICH way the grid points. Dividing each
-                % component by its own parameter variance matters, because the
-                % two columns are not equally estimable (var ratio ~1.35).
+                % it does not care WHICH way the grid points. Each component is
+                % divided by its OWN parameter variance, which is correct in
+                % general: per run the two columns can differ by ~1.4x. Summed
+                % over counterbalanced routes they nearly cancel (0.995 in
+                % sub-01s17 ses-01), so here it changes little.
                 At2   = (Sbc.^2 ./ g.sumVcc + Sbs.^2 ./ g.sumVss) ./ res;
                 Fgrid = At2 / 2;
                 Fgrid(bad) = NaN;
 
-                % Percent signal change of the across-run grid modulation:
-                % the size of the effect, normalised by the voxel's own mean
-                % so bright and dim voxels are comparable.
+                % Percent signal change of the across-run grid modulation.
+                % Aavg is the COHERENT amplitude - the length of the mean
+                % vector over runs, from the same summed betas F-grid uses -
+                % not the mean of the per-run amplitudes, which is larger when
+                % the per-run orientations disagree. Dividing by the voxel's
+                % own mean puts bright and dim voxels on one scale.
                 Aavg    = hypot(Sbc, Sbs) ./ max(nRuns, 1);
                 pctGrid = 100 * Aavg ./ g.meanLevel;
                 pctGrid(bad | ~(g.meanLevel > 0) | nRuns < 1) = NaN;

@@ -54,7 +54,13 @@ library(ggplot2)
 #  script has two halves: the rp files start at zero for every run, so they
 #  say nothing at all about how the runs sat relative to each other.
 
-rp_files <- list.files(PREPROC_DIR, pattern = "^rp_a.*\\.txt$",
+#  The rp file is named after realignment's INPUT, so it carries whatever
+#  prefix that input had: "rp_asub-*" when slice timing ran first,
+#  "rp_sub-*" when it ran afterwards (SLICETIME_ORDER in config.sh). Both
+#  are matched here, and img_path below strips "rp_" either way - which is
+#  what part 3 wants, because the between-run transform SPM estimated is
+#  written into the header of that input image.
+rp_files <- list.files(PREPROC_DIR, pattern = "^rp_[a-z]*sub-.*\\.txt$",
                        recursive = TRUE, full.names = TRUE)
 
 if (length(rp_files) == 0) {
@@ -66,7 +72,7 @@ if (length(rp_files) == 0) {
 #                       out of the task number on purpose
 parse_rp <- function(path) {
   base <- basename(path)
-  m <- str_match(base, "^rp_a(sub-[^_]+)_ses-(\\d+)_task-(\\d+)(.*)_bold\\.txt$")
+  m <- str_match(base, "^rp_[a-z]*(sub-[^_]+)_ses-(\\d+)_task-(\\d+)(.*)_bold\\.txt$")
   if (is.na(m[1, 1])) return(NULL)
   tibble(
     subject_id = m[1, 2],

@@ -49,7 +49,7 @@ function T = check_run_quality(derivRoot, varargin)
 %                 every session: data quality is not affected by an
 %                 intervention the way grid signal might be.
 %   'Subjects'    {} = all
-%   'FuncPrefix'  '' auto-detects su* then u*
+%   'FuncPrefix'  '' auto-detects sua/sau/su then ua/au/u
 %   'FdThreshold' 0.5 mm
 %   'NTop'        500 voxels for task_r2
 %   'Trial'       label for the CSV
@@ -156,7 +156,11 @@ function [files, prefix] = find_runs(fdir, wanted)
 if ~isempty(wanted)
     files = dir(fullfile(fdir, [wanted '*_bold.nii'])); prefix = wanted; return;
 end
-for pre = {'su','u'}
+% Most processed first, and both slice-timing orders: 'ua' is STC before
+% realign, 'au' is STC after it (SLICETIME_ORDER). 'u'/'su' last, because
+% those names are also what SPM's FieldMap toolbox gave its unwarped sample
+% in older trees - a single volume, which would be picked over the series.
+for pre = {'sua','sau','su','ua','au','u'}
     files = dir(fullfile(fdir, [pre{1} 'sub*_bold.nii']));
     if ~isempty(files), prefix = pre{1}; return; end
 end
@@ -164,7 +168,9 @@ files = []; prefix = '';
 end
 
 function TR = run_tr(f)
-j = regexprep(fullfile(f.folder,f.name), '^(.*/)su?(sub-.*)\.nii$', '$1$2.json');
+% The sidecar belongs to the raw series, so drop whatever SPM prepended:
+% a BIDS name starts at 'sub-'.
+j = regexprep(fullfile(f.folder,f.name), '^(.*/)[a-z]*(sub-.*)\.nii$', '$1$2.json');
 TR = 2;
 if isfile(j)
     d = jsondecode(fileread(j));

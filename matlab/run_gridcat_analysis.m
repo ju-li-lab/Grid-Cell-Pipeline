@@ -77,14 +77,21 @@ CIRCSTAT_DIR = cfg_or(cfg, 'CIRCSTAT_DIR', fullfile(GRIDCAT_DIR, 'CircStat2012a'
 % FUNC_PREFIX is derived, not stored: SPM prepends RESLICE_PREFIX when it
 % reslices and SMOOTH_PREFIX on top when smoothing runs. The shell side
 % derives it the same way, in func_prefix() in bids_common.sh.
-% SPM prepends, so the prefixes stack in stage order:
+% SPM prepends, so the prefixes stack in stage order, and SLICETIME_ORDER
+% decides which side the slice-timing letter lands on:
 %   raw -> a (slice timing) -> u (reslice) -> s (smooth)  =>  "sua"
+%   raw -> u (reslice) -> a (slice timing) -> s (smooth)  =>  "sau"
 RESLICE_PREFIX   = cfg_or(cfg, 'RESLICE_PREFIX', 'u');
 SMOOTH_PREFIX    = cfg_or(cfg, 'SMOOTH_PREFIX',  's');
 SLICETIME_PREFIX = cfg_or(cfg, 'SLICETIME_PREFIX', 'a');
+SLICETIME_ORDER  = lower(strtrim(cfg_or(cfg, 'SLICETIME_ORDER', 'before')));
 FUNC_PREFIX = RESLICE_PREFIX;
 if any(strcmp(cfg_or(cfg, 'DO_SLICE_TIMING', '0'), {'1','true'}))
-    FUNC_PREFIX = [FUNC_PREFIX SLICETIME_PREFIX];
+    if strcmp(SLICETIME_ORDER, 'after')
+        FUNC_PREFIX = [SLICETIME_PREFIX RESLICE_PREFIX];
+    else
+        FUNC_PREFIX = [RESLICE_PREFIX SLICETIME_PREFIX];
+    end
 end
 if str2double(cfg_or(cfg, 'SMOOTH_FWHM', '0')) > 0
     FUNC_PREFIX = [SMOOTH_PREFIX FUNC_PREFIX];

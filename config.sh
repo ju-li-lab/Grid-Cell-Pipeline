@@ -92,13 +92,18 @@ PREPROC_MODE=realign_unwarp
 #   vdm       one voxel displacement map per task.  -> func/vdm_task-<N>.nii
 #             Does nothing for realign_only, or topup+applytopup.
 #   slicetime shift every slice to the same point in the TR.  -> a*_bold.nii
-#             Does nothing when DO_SLICE_TIMING=0.
+#             Does nothing when DO_SLICE_TIMING=0. Runs before or after
+#             realign, as SLICETIME_ORDER says.
 #   realign   apply the correction + motion correction.
 #             -> u*_bold.nii, rp_*.txt, meanu_session.nii
 #   coreg     coregister T2w -> session mean, reslice ROIs.  -> anat/r*_mask.nii
 #   smooth    Gaussian smoothing.  -> func/su*_bold.nii
 #
-# Shorthands: all, fieldmap (= topup,vdm), post_fieldmap (= slicetime,realign,coreg,smooth)
+# Stages always run in pipeline order whatever order you list them in, and
+# where "slicetime" sits in that order is SLICETIME_ORDER's doing.
+#
+# Shorthands: all, fieldmap (= topup,vdm), post_fieldmap (= everything after
+# the fieldmap stages, in the right order for SLICETIME_ORDER)
 # Override for one submission:  bash 01_preprocess.sbatch --stages smooth
 PREPROC_STAGES=all
 
@@ -269,7 +274,8 @@ FIELDMAP_MAGNITUDE_SOURCE=structural
 #  Output file prefixes
 # -----------------------------------------------------------------------------
 #  These must match what SPM actually writes. FUNC_PREFIX is derived from
-#  them (SMOOTH_PREFIX + RESLICE_PREFIX when smoothing is on), so there is
+#  them (SMOOTH_PREFIX + RESLICE_PREFIX when smoothing is on, and
+#  SLICETIME_PREFIX on whichever side SLICETIME_ORDER puts it), so there is
 #  nothing to keep in sync by hand.
 
 RESLICE_PREFIX=u
@@ -293,6 +299,38 @@ SLICETIME_PREFIX=a
 # ones carry SLICETIME_PREFIX), so re-run the preprocessing from "slicetime"
 # onwards after changing it.
 DO_SLICE_TIMING=1
+
+# WHERE the correction sits relative to Realign & Unwarp / Realign:
+#
+#   before   slice timing first, then realignment.
+#            raw -> a*_bold.nii -> ua*_bold.nii   (prefix "ua")
+#   after    realignment first, then slice timing.
+#            raw -> u*_bold.nii -> au*_bold.nii   (prefix "au")
+#
+# There is no settled answer, which is why it is a switch. The argument for
+# "before" is that the slice times describe when each SLICE was acquired, and
+# after reslicing a voxel's time course is a mix of neighbouring slices
+# acquired at different times, so the correction is applied to data whose
+# slice identity has already been blurred. The argument for "after" is that
+# shifting in time before the motion estimate makes the estimate itself read
+# partly interpolated data, and with a long TR relative to the slice span a
+# through-plane movement is spread across slices before it is measured.
+#
+# For the entorhinal cortex the second argument has teeth: it sits at the edge
+# of the slab, where through-plane motion and the unwarping both act hardest,
+# so running "after" and comparing the two is worth the disk space. Realignment
+# is unaffected by this switch in the "after" order - it sees the untouched EPI.
+#
+# Both orders are correct SPM usage. Nothing else in the pipeline needs
+# changing: the prefix the later stages read is derived from this
+# (func_prefix() in bids_common.sh), so GridCAT picks up the right series.
+#
+# Flipping this redoes both operations, so re-run everything past the
+# fieldmap:  bash submit_preproc.sh --stages post_fieldmap
+# Keep the two orders in separate DERIV_ROOT trees. The filenames differ, so
+# a tree holding both uasub-* and ausub-* is a tree where you cannot tell
+# which one GridCAT read.
+SLICETIME_ORDER=before
 
 # Smoothing kernel FWHM in mm, isotropic. 0 skips smoothing entirely.
 #
