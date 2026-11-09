@@ -89,8 +89,7 @@ and that `--keep` is not so small that only a handful of voxels survive.
 bash tools/onset_check/run_onset_check.sh
 ```
 
-Defaults: the preprocessed tree and series prefix from `config.sh`, event
-tables from `OUTPUT_ROOT/GLM_runauto/EventFiles/Event_tables`, all subjects,
+Defaults: the preprocessed tree and series prefix from `config.sh`, all subjects,
 all sessions, tasks 1–3, microtime onset 9 of 16, a sweep of ±5 TR in steps of
 one microtime bin. Writes `onset_check.csv` (one row per run) and
 `onset_check_curve.csv` (the pooled curve) to `OUTPUT_ROOT/onset_check`.
@@ -100,6 +99,12 @@ Start with one subject to check the paths resolve:
 ```bash
 bash tools/onset_check/run_onset_check.sh --sub sub-01s17 --sessions ses-01
 ```
+
+The event tables are found the way `run_gridcat_analysis.m` finds them: it
+tries `GLM_runauto/EventFiles/Event_tables`, then `GLM_runauto/EventData`, then
+anything holding `*EventData.txt` anywhere below `GLM_runauto`. The banner
+prints the directory it settled on and how many tables are in it — check that
+count matches the number of runs you expect. `--events DIR` overrides it.
 
 `--help` lists every option.
 

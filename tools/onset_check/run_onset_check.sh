@@ -18,7 +18,9 @@
 #    bash tools/onset_check/run_onset_check.sh --per-slice --json /path/to_bold.json
 #
 #  Options:
-#    --events DIR    event tables. Default OUTPUT_ROOT/GLM_runauto/EventFiles/Event_tables
+#    --events DIR    event tables. Default: searched for under
+#                    OUTPUT_ROOT/GLM_runauto (EventFiles/Event_tables, EventData,
+#                    then anywhere below it)
 #    --deriv DIR     preprocessed tree. Default from config.sh
 #    --prefix P      series to read. Default from func_prefix() in bids_common.sh
 #    --sub SUB       limit to one subject (repeatable)
@@ -81,7 +83,23 @@ source "${ROOT_DIR}/bids_common.sh"
 : "${SPM_DIR:?ERROR: SPM_DIR not set in config.sh}"
 
 [[ -z "$DERIV"  ]] && DERIV="$(deriv_preproc)"
-[[ -z "$EVENTS" ]] && EVENTS="${OUTPUT_ROOT}/GLM_runauto/EventFiles/Event_tables"
+# Event tables: the pipeline itself tries a known layout and then falls back to
+# a recursive scan (run_gridcat_analysis.m), so do the same rather than
+# hard-coding one directory.
+if [[ -z "$EVENTS" ]]; then
+    GLM_RUNAUTO="${OUTPUT_ROOT}/GLM_runauto"
+    for cand in "${GLM_RUNAUTO}/EventFiles/Event_tables" \
+                "${GLM_RUNAUTO}/EventData" \
+                "${GLM_RUNAUTO}"; do
+        if compgen -G "${cand}/*EventData.txt" > /dev/null 2>&1; then
+            EVENTS="$cand"; break
+        fi
+    done
+    if [[ -z "$EVENTS" && -d "$GLM_RUNAUTO" ]]; then
+        found="$(find "$GLM_RUNAUTO" -name '*EventData.txt' ! -name '._*' 2>/dev/null | head -1 || true)"
+        [[ -n "$found" ]] && EVENTS="$(dirname "$found")"
+    fi
+fi
 [[ -z "$OUT"    ]] && OUT="${OUTPUT_ROOT}/onset_check"
 
 # TR lives in spm_options.m, not config.sh.
@@ -101,7 +119,16 @@ if [[ "$PERSLICE" == "true" && -z "$JSON" ]]; then
     exit 1
 fi
 [[ ! -d "$DERIV"  ]] && { echo "ERROR: no preprocessed tree at: $DERIV" >&2; exit 1; }
-[[ ! -d "$EVENTS" ]] && { echo "ERROR: no event tables at: $EVENTS" >&2; exit 1; }
+if [[ -z "$EVENTS" || ! -d "$EVENTS" ]]; then
+    echo "ERROR: could not find a directory holding *EventData.txt." >&2
+    echo "       Looked under ${OUTPUT_ROOT}/GLM_runauto. Pass --events DIR." >&2
+    exit 1
+fi
+if ! compgen -G "${EVENTS}/*.txt" > /dev/null 2>&1; then
+    echo "ERROR: ${EVENTS} holds no .txt event tables." >&2
+    exit 1
+fi
+
 
 to_cell() { local out="{"; for x in "$@"; do out="${out}'${x}',"; done; printf '%s}' "${out%,}"; }
 sub_arg="{}"; [[ ${#SUBS[@]} -gt 0 ]] && sub_arg="$(to_cell "${SUBS[@]}")"
@@ -112,6 +139,7 @@ echo "============================================"
 echo "  onset_check"
 echo "  Tree:     ${DERIV}"
 echo "  Events:   ${EVENTS}"
+echo "            $(find "$EVENTS" -maxdepth 1 -name '*.txt' ! -name '._*' 2>/dev/null | wc -l | tr -d ' ') event tables"
 echo "  Prefix:   \"${PREFIX}\"$([[ "$PERSLICE" == "true" ]] && echo '  (no slice timing)')"
 echo "  TR:       ${TR_VAL}"
 echo "  Tasks:    ${TASKS}"
