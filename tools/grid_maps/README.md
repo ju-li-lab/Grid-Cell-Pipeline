@@ -31,6 +31,7 @@ cross-session number there mixes measurement reliability with a real effect.
 | 4 | `R-runs` | does a voxel keep its orientation across runs? |
 | 5 | `clust-size`, `clust-ori` | *where* do the agreeing voxels sit? |
 | 6 | `coh-local`, `z-local` | the same as 3 and 5, in Rayleigh's units |
+| 7 | `F-grid`, `pct-grid` | does the voxel's wobble actually fit a grid? |
 
 Stop at the first one that is empty. If there is no ROI left (1), nothing below
 it means anything.
@@ -63,9 +64,23 @@ analysis fixes that.
 
 **Why this one matters more than it looks.** It is the **only map here that is
 blind to direction**, so it is the only one you may select voxels on without
-biasing GLM2. This is Stangl's "pick high-SNR voxels" suggestion, computed
-inside the GLM you already ran. Do **not** select on amplitude: amplitude is
-the thing you are testing.
+biasing GLM2. Do **not** select on amplitude: amplitude is the thing you are
+testing.
+
+**But it is NOT a tSNR, and on its own it is a poor selection criterion.**
+`1/sqrt(ResMS)` has no mean normalisation, and noise scales with signal level,
+so it largely tracks *inverse* intensity. Measured inside one GLM, in a
+princeErC ROI whose mean level spans 14.6x (`thr00`, so the dim tail is still
+there): `Spearman(1/sqrt(ResMS), mean level) = -0.763`, against **+0.783** for
+`beta_constant/sqrt(ResMS)`. The two criteria correlate **-0.245** with each
+other and share only 45% of their top half. **For selection, divide by the run
+constant** (`beta_constant/sqrt(ResMS)`) or use the real tSNR from
+`tools/roi_tsnr`. Use this map for looking, not for cutting.
+
+It gets worse once `mthresh = -Inf`. In the `thr08` GLM the level range is only
+1.6x and the two agree much better (+0.616, 75% overlap) — because the 0.8 cut
+had already removed the dim voxels. Removing that cut widens the range and
+makes the unnormalised map actively misleading.
 
 ---
 
@@ -257,7 +272,8 @@ scanner drift as noise that the GLM removes anyway).
 
 | criterion | safe? | the catch |
 |---|---|---|
-| `1/sqrt(ResMS)` (the `sens` map) | yes | the grid pmods are in GLM1's model, so a strong response very slightly lowers ResMS. Negligible against ~1000 df, and it is GLM1's half, not the half GLM2 tests. |
+| `beta_constant/sqrt(ResMS)` | yes | **the one to use.** A GLM-native tSNR. The grid pmods are in GLM1's model, so a strong response very slightly lowers ResMS — measured at 0.16%, and it is GLM1's half, not the half GLM2 tests. |
+| `1/sqrt(ResMS)` (the raw `sens` map) | **no** | not mean-normalised, so it tracks *inverse* intensity (Spearman -0.763 with mean level at `thr00`). Use it to look, not to cut. |
 | tSNR from the timeseries | yes | SD includes **task-driven** variance, so a strongly responding voxel reads *lower*. Also small, but it points the wrong way. |
 | `mean(beta_constant)/sqrt(ResMS)` | yes | best of both - normalises by the voxel's own mean, so coil sensitivity drops out. Read the constants by name from `SPM.xX.name`; `keep1` shifts their numbers. |
 | **amplitude** (`voxelwiseAmplitude_*`) | **NO** | direction-dependent. It is the thing GLM2 tests. Selecting on it is the circular move. |
@@ -315,3 +331,120 @@ at the end of the function - it only keeps `roi_tsnr`, the ROI **mean**.
 Selection needs the image. Keeping it is a two-line change (an output path plus
 sparing `$tmp/tsnr.*` from the `rm`). Or skip it and use the `sens` map, which
 is already written per subject x session and needs nothing new.
+
+---
+
+## 7. `F-grid.nii`, `pct-grid.nii`, `tsnr-glm.nii` — does the model fit?
+
+### First, what ResMS is
+
+A voxel's data is one number per scan: 1041 intensities across the three runs.
+The GLM says that series is a weighted sum of known shapes plus a leftover:
+
+```
+y(t) = b1*rotate(t) + b2*stand(t) + b3*unused-translate(t)
+     + b4*translate(t) + b5*pmodSIN(t) + b6*pmodCOS(t)
+     + b7..b12*motion(t) + b13*constant + drift  +  e(t)
+```
+
+SPM picks the `b`s that make the leftover `e(t)` as small as possible.
+**ResMS is the variance of that leftover** — `sum(e^2)` over the error degrees
+of freedom, one number per voxel. `sqrt(ResMS)` is its SD, in intensity units:
+the typical size of the wobble the model could not account for.
+
+So ResMS is "the part of the voxel's fluctuation not explained by **the whole
+model**". That includes motion, rotate/stand and the translate events — and
+also the drift, **and the grid modulation itself**, because `pmodSIN` and
+`pmodCOS` are two of the model's columns. The expected grid modulation has
+already been subtracted before ResMS is computed, which is exactly why ResMS
+cannot tell you where the grid signal is.
+
+Measured in princeErC (run 1, 93 voxels, unsmoothed), as a share of the
+variance left after the high-pass:
+
+| component | share |
+|---|---|
+| **residual (ResMS)** | **91.06%** |
+| motion (6 regressors) | 5.70% |
+| rotate / stand | 1.04% |
+| translate, unused half | 0.50% |
+| translate, main effect | 0.37% |
+| **grid pmods (sin + cos)** | **0.31%** |
+
+### `F-grid` — how well the grid model fits
+
+The grid hypothesis says the response to translating is larger at some
+headings than others, with a 60 degree period. In the GLM that is the fitted
+component `b_sin*pmodSIN(t) + b_cos*pmodCOS(t)`. The question "how well does
+this voxel match that?" is answered by comparing the size of that component
+with the voxel's own noise:
+
+```
+F = ( Sb_sin^2/sum(Vss) + Sb_cos^2/sum(Vcc) ) / ResMS / 2
+```
+
+where `Sb` are the betas summed over runs and `Vss`, `Vcc` are those columns'
+parameter variances from `SPM.xX.Bcov`. **This is an F statistic on 2 and
+erdf degrees of freedom**, the same thing an F-contrast over the two pmod
+columns gives you in SPM.
+
+Two things make it the right map for this question. It is **orientation-free**:
+it asks whether *any* 6-fold modulation is present, not whether the grid points
+a particular way, so you do not have to trust phi to read it. And each
+component is divided by **its own** variance, which matters here because the
+sin and cos columns are not equally estimable (variance ratio ~1.35 in runs 1
+and 3).
+
+**How to read it.** For F(2, 969): the null **median is 0.694**, the null mean
+is 1.00, and p < 0.05 uncorrected is **F > 3.01**. Measured in princeErC,
+sub-01s17 ses-01:
+
+| | value |
+|---|---|
+| median F | **0.42** (null median 0.69) |
+| 90th percentile | 1.96 |
+| max | 4.47 |
+| ErC voxels at p < 0.05 | **3 of 93** (4.7 expected by chance) |
+| whole brain at p < 0.05 | **3.9%** (5.0% expected by chance) |
+
+So the fit is at chance or just under it, in the ErC and everywhere else. That
+is the honest headline, and it is what you would want to know before tuning
+anything further.
+
+**What it is not.** Because the orientation is fitted to the same data, a high
+F in GLM1 is not evidence of grid coding — it is "a 6-fold modulation at the
+orientation that best fits this data". That is precisely why the design needs
+the GLM1/GLM2 split. Read `F-grid` as a troubleshooting map, never as a result,
+and never select voxels on it.
+
+### `pct-grid` — the same thing in physiological units
+
+```
+pct-grid = 100 * A_allRunsAvg / mean(beta_constant)
+```
+
+The size of the fitted grid modulation as a **percentage of the voxel's own
+mean signal**. This is the map that "takes the amplitude of the voxels into
+account" in the sense that matters: dividing by the run constant removes the
+voxel's brightness, so a dim ErC voxel and a bright one are on the same scale.
+(Within a single voxel there is nothing to weight — GridCAT's amplitude
+weighting is for *combining* voxels, not for making a map.)
+
+Measured in princeErC: **median 2.72%**, 90th percentile 5.6%, max 11.3%. Note
+how implausible that is for a real BOLD effect — a genuine entorhinal task
+response is a few tenths of a percent. A 2.7% "modulation" is the signature of
+a quantity made of noise, and it agrees with the independent finding that
+amplitude is 97-99% noise.
+
+The two maps answer different questions and you want both: **`pct-grid` is how
+big, `F-grid` is how sure.**
+
+### `tsnr-glm` — the mean-normalised companion to `sens`
+
+```
+tsnr-glm = mean(beta_constant) / sqrt(ResMS)
+```
+
+A GLM-native tSNR. Use this, not `sens`, whenever you want a sensitivity
+number: `sens` is `1/sqrt(ResMS)` with no mean normalisation and therefore
+tracks inverse intensity (see section 2).

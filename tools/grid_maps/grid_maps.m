@@ -205,13 +205,43 @@ for s = 1:numel(uSubs)
         thin = N < 5;                       % too few members for a Rayleigh
         coh(thin) = NaN;  zloc(thin) = NaN;
 
-        % ---- direction-blind sensitivity ------------------------------
-        sens    = [];
+        % ---- noise, sensitivity, and how well the grid model fits -----
+        sens = []; tsnrGlm = []; Fgrid = []; pctGrid = [];
         resPath = fullfile(gdir, 'ResMS.nii');
         if isfile(resPath)
-            res  = double(niftiread(resPath));
-            sens = 1 ./ sqrt(res);
-            sens(~isfinite(res) | res <= 0) = NaN;
+            res = double(niftiread(resPath));
+            bad = ~isfinite(res) | res <= 0;
+
+            % 1/sqrt(ResMS): the NOISE only. Not a tSNR - it has no mean
+            % normalisation, so it largely tracks INVERSE intensity. Good for
+            % looking at, wrong to select on.
+            sens = 1 ./ sqrt(res);  sens(bad) = NaN;
+
+            % Everything below needs the design, for the two pmod columns'
+            % parameter variances and for the run constants.
+            g = read_glm_scaling(gdir, o.Event, runNums);
+            if ~isempty(g)
+                % A GLM-native tSNR: mean level over residual SD.
+                tsnrGlm = g.meanLevel ./ sqrt(res);
+                tsnrGlm(bad | ~(g.meanLevel > 0)) = NaN;
+
+                % F on the SUMMED sin/cos betas, df (2, erdf). Asks: is there
+                % a 6-fold modulation here, with ONE orientation shared across
+                % runs, bigger than this voxel's own noise? Orientation-free -
+                % it does not care WHICH way the grid points. Dividing each
+                % component by its own parameter variance matters, because the
+                % two columns are not equally estimable (var ratio ~1.35).
+                At2   = (Sbc.^2 ./ g.sumVcc + Sbs.^2 ./ g.sumVss) ./ res;
+                Fgrid = At2 / 2;
+                Fgrid(bad) = NaN;
+
+                % Percent signal change of the across-run grid modulation:
+                % the size of the effect, normalised by the voxel's own mean
+                % so bright and dim voxels are comparable.
+                Aavg    = hypot(Sbc, Sbs) ./ max(nRuns, 1);
+                pctGrid = 100 * Aavg ./ g.meanLevel;
+                pctGrid(bad | ~(g.meanLevel > 0) | nRuns < 1) = NaN;
+            end
         end
 
         stem = fullfile(outDir, sprintf('%s_%s', sub, ses));
@@ -221,13 +251,17 @@ for s = 1:numel(uSubs)
         write_map(refInfo, coh,    [stem '_coh-local']);
         write_map(refInfo, zloc,   [stem '_z-local']);
         write_map(refInfo, N,      [stem '_n-local']);
-        if ~isempty(sens), write_map(refInfo, sens, [stem '_sens']); end
+        if ~isempty(sens),    write_map(refInfo, sens,    [stem '_sens']);     end
+        if ~isempty(tsnrGlm), write_map(refInfo, tsnrGlm, [stem '_tsnr-glm']); end
+        if ~isempty(Fgrid),   write_map(refInfo, Fgrid,   [stem '_F-grid']);   end
+        if ~isempty(pctGrid), write_map(refInfo, pctGrid, [stem '_pct-grid']); end
 
         keep(end+1) = struct('ses', ses, 'mc', mc, 'ms', ms, ...
                              'info', refInfo, 'dir', gdir);        %#ok<AGROW>
 
         maps = struct('R_runs', Rruns, 'coh', coh, 'z', zloc, ...
-                      'sens', sens, 'amp', Am, 'kept', vm);
+                      'sens', sens, 'amp', Am, 'kept', vm, ...
+                      'tsnr', tsnrGlm, 'F', Fgrid, 'pct', pctGrid);
         rows = [rows; roi_rows(o, sub, ses, numel(runNums), maps, ...
                                refInfo, stem, 'roi-kept')];       %#ok<AGROW>
     end
@@ -241,7 +275,8 @@ for s = 1:numel(uSubs)
     write_map(tgtInfo, nSes, [stem '_n-sessions']);
 
     maps = struct('R_runs', Rses, 'coh', nan(size(Rses)), 'z', nan(size(Rses)), ...
-                  'sens', [], 'amp', nan(size(Rses)), 'kept', nSes >= 2);
+                  'sens', [], 'amp', nan(size(Rses)), 'kept', nSes >= 2, ...
+                  'tsnr', [], 'F', [], 'pct', []);
     rows = [rows; roi_rows(o, sub, keep(1).ses, numel(keep), maps, ...
                            tgtInfo, stem, 'roi-across')];          %#ok<AGROW>
 end
@@ -283,6 +318,51 @@ for k = 1:numel(f)
 end
 [runNums, ord] = sort(runNums);
 if ~isempty(runNums), bc = bc(:,:,:,ord); bs = bs(:,:,:,ord); end
+end
+
+function g = read_glm_scaling(gdir, event, runNums)
+% Parameter variances for the two pmod columns, and the run constants, read
+% from the GLM's own SPM.mat. Returns [] when it cannot be read, and then the
+% model-fit maps are simply skipped.
+%
+% Bcov is pinv(X'X) after filtering and whitening, so var(beta_j) is
+% Bcov(j,j)*ResMS. The sin and cos columns do NOT have equal variance here
+% (ratio ~1.35 in runs 1 and 3, because the routes sample headings unevenly),
+% which is exactly why each component is divided by its own.
+g = [];
+f = fullfile(gdir, 'SPM.mat');
+if ~isfile(f), return; end
+try
+    S = load(f, 'SPM');
+catch
+    warning('grid_maps:noSPMmat', 'Could not read %s - skipping the model-fit maps.', f);
+    return;
+end
+names = S.SPM.xX.name;
+Bcov  = S.SPM.xX.Bcov;
+
+sumVss = 0; sumVcc = 0; lvl = []; nLvl = 0;
+for r = runNums(:)'
+    is = find_col(names, sprintf('Sn(%d) GridEvent-%sx-pmodSIN^1*bf(1)', r, event));
+    ic = find_col(names, sprintf('Sn(%d) GridEvent-%sx-pmodCOS^1*bf(1)', r, event));
+    ik = find_col(names, sprintf('Sn(%d) constant', r));
+    if isempty(is) || isempty(ic) || isempty(ik), return; end
+    sumVss = sumVss + Bcov(is, is);
+    sumVcc = sumVcc + Bcov(ic, ic);
+    B = double(niftiread(fullfile(gdir, sprintf('beta_%04d.nii', ik))));
+    if isempty(lvl), lvl = zeros(size(B)); end
+    B(~isfinite(B)) = NaN;
+    lvl  = lvl + B;
+    nLvl = nLvl + 1;
+end
+g = struct('sumVss', sumVss, 'sumVcc', sumVcc, ...
+           'meanLevel', lvl / max(nLvl, 1), 'erdf', S.SPM.xX.erdf);
+end
+
+function i = find_col(names, want)
+% Exact match on the regressor name, so a prefix like UnusedGridEvent- can
+% never be picked up by accident.
+i = find(strcmp(names, want), 1);
 end
 
 function [Sa, Sb] = sum_valid(a, b, valid)
@@ -501,7 +581,10 @@ for m = 1:numel(masks)
                    median(maps.coh(kept),    'omitnan'), ...
                    median(maps.z(kept),      'omitnan'), ...
                    med_or_nan(maps.sens, kept), ...
-                   median(maps.amp(kept),    'omitnan')}];          %#ok<AGROW>
+                   median(maps.amp(kept),    'omitnan'), ...
+                   med_or_nan(maps.tsnr, kept), ...
+                   med_or_nan(maps.F,    kept), ...
+                   med_or_nan(maps.pct,  kept)}];                   %#ok<AGROW>
     fprintf('%-11s %-8s %5d %-26s %6d %6d %5.1f%% %7.3f %7.2f\n', ...
             sub, ses, nUnits, label, nroi, nkept, ...
             100 * nkept / max(nroi, 1), ...
@@ -537,13 +620,14 @@ end
 
 function append_csv(path, rows)
 hdr = ['trial,subject,session,roi,n_units,n_roi,n_kept,pct_kept,' ...
-       'med_R,med_coh_local,med_z_local,med_sens,med_amp'];
+       'med_R,med_coh_local,med_z_local,med_sens,med_amp,' ...
+       'med_tsnr_glm,med_F_grid,med_pct_grid'];
 newFile = ~isfile(path);
 fid = fopen(path, 'a');
 if fid < 0, error('Cannot write CSV: %s', path); end
 if newFile, fprintf(fid, '%s\n', hdr); end
 for i = 1:size(rows, 1)
-    fprintf(fid, '%s,%s,%s,%s,%d,%d,%d,%.2f,%.4f,%.4f,%.4f,%.4f,%.4f\n', rows{i,:});
+    fprintf(fid, '%s,%s,%s,%s,%d,%d,%d,%.2f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f\n', rows{i,:});
 end
 fclose(fid);
 end
