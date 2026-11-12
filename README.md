@@ -3,8 +3,8 @@
 SPM preprocessing and GridCAT grid-cell analysis for BIDS fMRI data, built to
 run as SLURM jobs on an HPC cluster.
 
-Four stages: discover subjects, preprocess with SPM, flatten the output into the
-layout GridCAT expects, run the GLMs.
+Four stages: discover subjects, preprocess with SPM, flatten the output into
+the layout GridCAT expects, run the GLMs.
 
 ---
 
@@ -17,38 +17,19 @@ bash run_all.sh
 ```
 
 That runs subject discovery locally and queues the three cluster stages as one
-SLURM dependency chain, so there is nothing to come back and launch.
+SLURM dependency chain. `bash run_all.sh --check` checks the configuration
+without submitting anything.
 
-To check the configuration without submitting anything:
-
-```bash
-bash run_all.sh --check
-```
-
-To run one stage on its own, call its script directly — each takes the same
-options independently:
+To run one stage on its own, call its script directly. **`bash` submits** a
+job and prints its id; `--local` runs it in the foreground instead:
 
 ```bash
-bash 00_list_subjects.sh                                   # rebuild the subject list
-bash submit_preproc.sh --stages smooth                     # re-smooth only
+bash 00_list_subjects.sh                                    # rebuild the subject list
+bash submit_preproc.sh --stages smooth                      # re-smooth only
 bash submit_preproc.sh --sub sub-01s13 --ses ses-01 --local # one session, here, now
 bash 02_prepare_gridcat.sh
 bash 03_gridcat.sh
 ```
-
-`00_list_subjects.sh` runs here and now — it only reads the BIDS directory. The
-three cluster stages behave alike: **`bash` submits** a job and prints its id,
-and `--local` runs it in the foreground instead, which is what you want when
-debugging:
-
-```bash
-bash submit_preproc.sh --sub sub-01s13 --ses ses-01 --local
-bash 02_prepare_gridcat.sh --local
-bash 03_gridcat.sh --local
-```
-
-`sbatch 0N_...` also works for stages 2 and 3; SLURM runs the submitter, which
-submits the real job.
 
 To make a submitted stage wait for another job:
 
@@ -60,26 +41,16 @@ STAGE_DEPENDENCY=afterok:12345 bash 02_prepare_gridcat.sh
 
 ## Settings
 
-Two files, each read by the language that uses it. Nothing else needs editing.
+Two files, each read by the language that uses it:
 
 | File | Holds | Read by |
 |---|---|---|
-| `config.sh` | paths, SLURM resources, module names, subject filters, modes, filename patterns | sourced directly by the shell scripts; MATLAB reads the few keys it shares via `matlab/read_config.m` |
+| `config.sh` | paths, SLURM resources, module names, subject filters, modes, filename patterns | the shell scripts; MATLAB reads shared keys via `matlab/read_config.m` |
 | `spm_options.m` | acquisition parameters and everything that goes into an SPM batch | MATLAB, as real values |
 
-`spm_options.m` is a MATLAB function returning option structs in SPM's own
-shape, which the batch builders hand to SPM wholesale:
-
-```matlab
-matlabbatch{1}.spm.spatial.realignunwarp.eoptions = CFG.spm.realignunwarp.eoptions;
-```
-
-So **any option SPM accepts can be set by adding a field to `spm_options.m`** —
-no parser to extend, no mapping table, no validator to update. Field names are
-SPM's own; look them up in the SPM batch editor or in `spm_cfg_realignunwarp.m`
-and `spm_cfg_fieldmap.m`.
-
-To see the current shell settings: `cat config.sh`.
+`spm_options.m` returns option structs in SPM's own shape, which the batch
+builders hand to SPM wholesale — so **any option SPM accepts can be set by
+adding a field there**, no parser or mapping table to extend.
 
 Every run copies both files next to its output, so a result always carries the
 settings that produced it.
@@ -106,27 +77,17 @@ BIDS_ROOT/
         sub-XX_ses-YY_task-reverse_bold.nii.gz reverse-PE EPI, for topup
 ```
 
-The ROI filenames must contain `ROI_LABEL` from `config.sh` (`ErC` above). That
-one setting is what the preprocessing, the flattening and the GLMs all filter on.
-
-### Assumptions
-
-- ROI masks are **label masks** (integer-valued), not probability maps.
-- All tasks entering one GLM have comparable acquisition parameters —
-  phase-encode direction, readout time, voxel size, TR. Runs that differ need
-  separate preprocessing or exclusion.
-- Each run has exactly one motion regressor file (`rp*.txt`).
-- You know which space every file is in at each stage: native T2w, native EPI,
-  unwarped EPI, resliced EPI.
+The ROI filenames must contain `ROI_LABEL` from `config.sh`. Assumptions: ROI
+masks are label masks (integer-valued); all tasks entering one GLM share
+comparable acquisition parameters; each run has exactly one `rp*.txt`.
 
 ---
 
 ## Where output goes
 
-**Nothing is ever written into `BIDS_ROOT`.** SPM's Realign & Unwarp and
-Coregister write the transforms they estimate into the headers of their *input*
-images, and reading a `.nii.gz` leaves a decompressed twin behind. So every input
-is copied into a derivatives tree first and the copy is what gets touched.
+**Nothing is ever written into `BIDS_ROOT`.** SPM writes the transforms it
+estimates into the headers of its *input* images, so every input is copied
+into a derivatives tree first and the copy is what gets touched.
 
 ```
 <DERIV_ROOT>/                       (default: OUTPUT_ROOT/derivatives)
@@ -140,22 +101,24 @@ is copied into a derivatives tree first and the copy is what gets touched.
 
 <OUTPUT_ROOT>/
   GLM_runauto/                      GridCAT input, flattened
-  GLM_output[_<RUN_VARIANT>]/       GLM results, *_grid_metrics.txt
+    ROI/                            masks as resliced by the preprocessing
+    ROI_tsnr/                       tSNR-filtered masks (tools/roi_tsnr)
+  GLM_output[_<RUN_VARIANT>]/       GLM results
+    run_info.tsv                    the settings that produced this run
+    *_grid_metrics.txt              GridCAT's grid metrics
+    *_voxel_ori.csv                 per-voxel grid orientation per run
 ```
 
-`spm-preproc` is regenerated from scratch on every full run — see `DERIV_RESET`
-in `config.sh`. A resumed run keeps what is there, because that is its input.
-
-`RUN_VARIANT` names the GLM output folder, so several analyses can coexist. Each
-submission snapshots the settings, so you can change `RUN_VARIANT` and submit the
-next variant while one is still running.
+`spm-preproc` is regenerated from scratch on every full run (`DERIV_RESET`).
+`RUN_VARIANT` names the GLM output folder, so several analyses can coexist;
+each submission snapshots the settings, so you can change `RUN_VARIANT` and
+submit the next variant while one is still running. The variant name can stay
+short — `run_info.tsv` records the settings, so nothing needs encoding in the
+folder name.
 
 ---
 
 ## Preprocessing stages
-
-The SPM preprocessing is five stages. Each reads what it needs from disk, so you
-can stop after any of them, inspect or replace the intermediate files, and resume.
 
 | Stage | Does | Writes |
 |---|---|---|
@@ -166,98 +129,47 @@ can stop after any of them, inspect or replace the intermediate files, and resum
 | `coreg` | T2w → session mean, reslice the ROIs | `anat/r*_mask.nii` |
 | `smooth` | Gaussian smoothing | `func/su*_bold.nii` |
 
-`slicetime` sits on whichever side of `realign` `SLICETIME_ORDER` names; the
-other four never move. Listing stages in a different order changes nothing —
-they always run in the sequence above.
-
-Set the default in `PREPROC_STAGES`, or override per submission:
+Each stage reads what it needs from disk, so you can stop after any of them,
+inspect or replace the intermediate files, and resume:
 
 ```bash
 bash submit_preproc.sh --stages vdm,realign,coreg,smooth   # resume from topup output
-bash submit_preproc.sh --stages realign,coreg,smooth       # resume from ready-made VDMs
 bash submit_preproc.sh --stages smooth                     # just re-smooth
 ```
 
-Shorthands: `all`, `fieldmap` (= topup,vdm), `post_fieldmap` (= everything after
-the fieldmap stages), `stc` (= slicetime).
+Shorthands: `all`, `fieldmap` (= topup,vdm), `post_fieldmap` (= everything
+after the fieldmap stages), `stc` (= slicetime). Stages always run in pipeline
+order whatever order you list them in.
 
 ### Slice timing
 
-Off unless `DO_SLICE_TIMING=1` in `config.sh`. It reads **`SliceTiming` from
-each run's own JSON sidecar** rather than assuming an order, and fails loudly
-if the sidecar has none — correcting with the wrong slice order is worse than
-not correcting at all, so it will not guess.
+Off unless `DO_SLICE_TIMING=1`. Reads **`SliceTiming` from each run's own JSON
+sidecar** and fails loudly if it is absent — correcting with the wrong order is
+worse than not correcting. Everything is shifted to
+`C.slicetime.ref_fraction` of the TR (default 0.5), which must agree with the
+GLM's `microtimeOnset = ref_fraction * microtimeResolution`; the stage checks
+the pair.
 
-Everything is shifted to `C.slicetime.ref_fraction` of the TR (default 0.5, the
-middle). That has to agree with the GLM: SPM samples the design matrix at
-`microtimeOnset` of `microtimeResolution` bins, so at 0.5 you want
-`microtimeOnset = microtimeResolution/2`. The stage checks the pair and warns
-if you change one without the other.
+`SLICETIME_ORDER` decides whether the correction runs before realignment
+(realignment sees corrected data, prefix `ua`) or after it (the motion
+estimate is made on the untouched EPI, prefix `au`). Both are correct SPM
+usage; for an ROI at the slab edge the `after` argument has teeth, so
+comparing the two is worth the disk space.
 
-#### Before or after realignment
-
-`SLICETIME_ORDER` in `config.sh` decides where the correction sits:
-
-| | pipeline | realignment sees |
-|---|---|---|
-| `before` (default) | raw → `a*_bold.nii` → `ua*_bold.nii` | slice-time corrected data |
-| `after` | raw → `u*_bold.nii` → `au*_bold.nii` | the untouched EPI |
-
-There is no settled answer, which is why it is a switch rather than a decision
-baked into the code.
-
-**For `before`:** the slice times describe when each *slice* was acquired. Once
-realignment has resliced the data, a voxel's time course is a blend of
-neighbouring slices acquired at different times, so correcting afterwards
-applies a per-slice shift to data whose slice identity has already been
-smeared.
-
-**For `after`:** shifting in time before the motion estimate means the estimate
-is made partly on interpolated data. With a long slice span relative to the TR
-— 30 slices over 1.97 s of a 2.06 s TR here — a through-plane movement is
-spread across slices before anything has measured it.
-
-The second argument bites hardest exactly where the grid analysis lives. The
-entorhinal cortex sits at the edge of the slab, where through-plane motion and
-the unwarping both act most strongly, so running both orders and comparing them
-is worth the disk space. Both are correct SPM usage.
-
-#### The prefix
-
-Turning slice timing on changes which files every later stage reads, because
-the corrected ones carry `SLICETIME_PREFIX`, and `SLICETIME_ORDER` decides
-which side of `RESLICE_PREFIX` it lands on — SPM prepends, so the letters stack
-in the order the stages ran:
+The prefix the later stages read is **derived, never stored** — from
+`DO_SLICE_TIMING`, `SLICETIME_ORDER` and `SMOOTH_FWHM`:
 
 | | `before` | `after` |
 |---|---|---|
 | `DO_SLICE_TIMING=0` | `u` | `u` |
-| `DO_SLICE_TIMING=0`, `SMOOTH_FWHM>0` | `su` | `su` |
+| + `SMOOTH_FWHM>0` | `su` | `su` |
 | `DO_SLICE_TIMING=1` | `ua` | `au` |
 | both | `sua` | `sau` |
 
-That is derived, never stored — `func_prefix()` in `bids_common.sh` for the
-shell side, and the same rule in `run_spm_preproc.m` (as `CFG.BOLD_PREFIX`) and
-`run_gridcat_analysis.m`. Nothing else has to change when you flip the switch:
-smoothing and the GridCAT preparation pick up the right series on their own.
-
-After changing `DO_SLICE_TIMING`, re-run from `slicetime` onwards:
-
-```bash
-bash submit_preproc.sh --stages slicetime,realign,coreg,smooth
-```
-
-After changing `SLICETIME_ORDER`, both operations have to be redone, so re-run
-everything past the fieldmap. The shorthand expands in the right sequence for
-whichever order is set, so it is the same command either way:
-
-```bash
-bash submit_preproc.sh --stages post_fieldmap
-```
-
-Keep the two orders in separate trees (`DERIV_ROOT`) or separate
-`RUN_VARIANT`s. A tree holding both `uasub-*` and `ausub-*` is a tree where you
-cannot tell which one an analysis used.
+(`func_prefix()` in `bids_common.sh`; the same rule in `run_spm_preproc.m` and
+`run_gridcat_analysis.m`.) After changing `DO_SLICE_TIMING`, re-run from
+`slicetime` onwards; after changing `SLICETIME_ORDER`, re-run
+`--stages post_fieldmap` and keep the two orders in separate trees.
 
 ---
 
@@ -267,53 +179,37 @@ cannot tell which one an analysis used.
 
 | Mode | Needs | How |
 |---|---|---|
-| `realign_unwarp` | `phasediff` + `magnitude1` in `fmap/` | SPM's FieldMap toolbox unwraps the phase and builds the VDM |
-| `topup` | a reverse phase-encode EPI | FSL topup estimates the field; `TOPUP_APPLY_METHOD` then either converts it to a VDM for Realign & Unwarp, or corrects the EPIs with `applytopup` followed by Realign only |
-| `precalc_fieldmap` | a ready-made B0 fieldmap | for sessions with a phasediff but **no** magnitude: `tools/make_fieldmaps.sh` builds the missing magnitude from the T1w with FSL, then SPM converts the fieldmap to a VDM |
-| `realign_only` | nothing | motion correction only. Useful as a control when you are working out whether unwarping is helping |
+| `realign_unwarp` | `phasediff` + `magnitude1` in `fmap/` | SPM's FieldMap toolbox builds the VDM |
+| `topup` | a reverse phase-encode EPI | FSL topup; `TOPUP_APPLY_METHOD` either converts the field to a VDM, or runs `applytopup` + Realign only |
+| `precalc_fieldmap` | a ready-made B0 fieldmap | for sessions with a phasediff but **no** magnitude: `tools/make_fieldmaps.sh` builds it from the T1w |
+| `realign_only` | nothing | motion correction only |
 
-Check the parameters against your JSON sidecars — wrong values here are silently
-wrong results, not errors:
+Check the acquisition parameters against your JSON sidecars — wrong values are
+silently wrong results, not errors:
 
 ```bash
-# readout time and echo times
 grep -E 'TotalReadoutTime|EstimatedTotalReadoutTime' sub-XX/ses-YY/func/*_bold.json
 grep -E 'EchoTime[12]' sub-XX/ses-YY/fmap/*_phasediff.json
-# phase-encode direction
 grep PhaseEncodingDirection sub-XX/ses-YY/func/*_bold.json
 ```
 
-BIDS stores times in seconds. `TOTAL_READOUT_MS` and the echo times in
-`spm_options.m` are in **milliseconds**; `C.topup.readout_sec` is in **seconds**.
-
-`EPI_BASED_FIELDMAP` must be `0` for a GRE phasediff fieldmap and `1` only when
-the fieldmap really is EPI-based.
+BIDS stores seconds; `TOTAL_READOUT_MS` and the echo times in `spm_options.m`
+are **milliseconds**, `C.topup.readout_sec` is **seconds**.
 
 ---
 
 ## Multiple runs of the same scan
 
-Run numbers are counted per modality and say nothing across modalities. If the
-subject climbed out of the scanner between sequences, `run-2` of the T2w and
-`run-2` of a task are from different visits, and pairing them coregisters the
-wrong anatomy.
+Run numbers are counted per modality, so `run-2` of the T2w need not belong
+with `run-2` of a task. The pipeline decides in this order:
 
-So the pipeline decides in this order:
-
-1. your explicit choice in `RUN_SELECTION_FILE`
-2. the run acquired closest in time, read from `AcquisitionTime` in the sidecars,
-   within `RUN_MATCH_GAP_MIN` minutes
+1. your explicit choice in `run_selection.tsv` (always in the pipeline
+   directory, next to `config.sh`) — write it with `bash tools/scan_multirun.sh`
+2. the run acquired closest in time, from `AcquisitionTime` in the sidecars
 3. nothing else is safe — with `STRICT_RUN_MATCHING=true` it stops and asks
 
-To write the selection file:
-
-```bash
-bash tools/scan_multirun.sh
-```
-
-It lists every run with its acquisition time and pre-fills a suggestion you can
-correct. Whatever was chosen is recorded in `preproc_run_selection.tsv` next to
-the output, which the GridCAT prep reads so the event files line up.
+Whatever was chosen is recorded in `preproc_run_selection.tsv` next to the
+output, which the GridCAT prep reads so the event files line up.
 
 ---
 
@@ -330,42 +226,57 @@ ASHS segmentation
 ### When the coregistration will not hold
 
 A T2w slab and a partial-volume task EPI overlap in only a small block of
-tissue. Normalised mutual information over a small overlap has a degenerate
-optimum: driving the two images apart shrinks the overlap to a near-uniform
-sliver, which can score better than the true alignment. When that happens SPM
-does not complain — it writes a mask that misses the brain, GridCAT finds
-nothing in it, and the session disappears from the analysis with no record of
-why. One session failed this way with the T2w translated 141 mm and both masks
-resliced to zero voxels.
-
-Two settings in `config.sh` deal with it:
+tissue, and NMI over a small overlap has a degenerate optimum: SPM can drive
+the images apart and write a mask that misses the brain without complaining.
+Two settings deal with it:
 
 ```bash
 COREG_VIA_TASK=rest        # route T2w -> whole-brain EPI -> session mean
 COREG_MIN_ROI_VOXELS=5     # fail the job instead of writing an empty mask
 ```
 
-`COREG_VIA_TASK` names the task label of a whole-brain run (a resting-state
-scan is the usual one). That image overlaps both the T2w and the task EPI
-generously, so neither step is a hard registration. Empty means the direct
-route, which stays the default.
+The masks are still resampled **once**: both coregistration steps are
+estimate-only and the single reslice applies the composed transform. After
+changing either setting, `--stages coreg` is enough.
 
-The masks are still resampled **once**. Both coregistration steps are
-estimate-only — they update the orientation matrix in each header and move no
-voxels — and the single reslice at the end applies whatever transform has
-accumulated. Two rigid transforms compose into one rigid transform, so the
-bridged route costs no accuracy over the direct one.
+### tSNR filtering
 
-After changing either setting, `--stages coreg` is enough: `DERIV_RESET=auto`
-only clears the derivatives when a run starts from its entry stage, so the
-realigned data is reused rather than rebuilt.
+`tools/roi_tsnr` drops low-tSNR outlier voxels from each mask (voxels more
+than 1.5 IQR below Q1 of the subject's ROI tSNR distribution, all sessions)
+and writes the result to `GLM_runauto/ROI_tsnr`. Set `ROI_TSNR_FILTER=1` in
+`config.sh` to make the GLM use those masks; the flag is recorded in
+`run_info.tsv`. See `tools/roi_tsnr/README.md`.
 
-`tools/ashs_extract_config.sh` is a separate config on purpose: it is a separate
-tool with its own vocabulary, run by hand, and folding it into `config.sh` would
-recreate the problem that file used to have. The one thing the two must agree on
-is the label name — `LABEL_NAMES` there, `ROI_LABEL` here.
+---
 
-`move_rois.sh` is dry-run by default; pass `--execute` to actually copy.
+## GridCAT output and R analysis
+
+Every GLM output folder carries `run_info.tsv` — one row with the settings
+that produced it (smoothing, mask patterns, event usage, regressor method,
+masking threshold, symmetry, averaging, tSNR filter, ...). The R importer
+joins it onto every result row, so GridCAT runs are compared by their
+settings, not by their folder names.
+
+```
+R/
+  import_gridcat.R        import one or MORE GLM output dirs ->
+                          run_info, grid_runs, grid_stability, voxel_ori
+  plot_gridcat_run.R      one run: contrast / Rayleigh z / NaN share per run
+  compare_gridcat_runs.R  several runs: which settings differ, paired metric
+                          comparison, phi agreement between runs
+  plot_voxel_stability.R  voxel grid orientation across runs as a spaghetti
+                          plot per subject x session
+  subject_info.csv        subject-level info (group, age, ...), joined on
+                          subject_id; extend it with any columns you need
+  look_at_tsnr.R          tSNR tables from tools/tsnr_report.sh
+  motion.R                within- and between-task motion QC
+  paths.R                 what route each run travelled (event files)
+```
+
+Set `GRIDCAT_DIRS` in `import_gridcat.R` to the output folder(s), source it,
+then source whichever plot script you need. Session-level scores (task
+performance etc.) can later be joined onto any table by `subject_id` +
+`session`.
 
 ---
 
@@ -379,13 +290,13 @@ run_all.sh              preflight checks + the whole SLURM chain
 00_list_subjects.sh     discover subject-sessions, apply filters
 01_preprocess.sbatch    SPM preprocessing, one array task per session
 02_prepare_gridcat.sh   flatten the output into GridCAT's layout
-03_gridcat.sh           GLM1 + GLM2
+03_gridcat.sh           GLM1 + GLM2, grid metrics, voxel orientations, run_info
 
 submit_preproc.sh       preprocessing submitter: stages, single sessions, --local
 bids_common.sh          shared shell helpers: derivative paths, BIDS names
 
 matlab/
-  run_spm_preproc.m     the five stages, in order
+  run_spm_preproc.m     the preprocessing stages, in order
   check_bids_params.m   compares the settings against the JSON sidecars
   inputs/               picking one run of each input, and recording which
   steps/                the SPM batches: realign, unwarp, coreg, smooth
@@ -396,81 +307,33 @@ matlab/
   run_gridcat_analysis.m
 
 tools/                  run by hand, not part of the chain
-R/                      reading the results back for plotting
-docs/                   pipeline map (generated, untracked)
+  roi_tsnr/             tSNR outlier filter for the ROI masks
+  grid_maps/            voxel-wise maps from GridCAT output
+  scan_multirun.sh      write run_selection.tsv
+  check_roi_coverage.sh how much of each ROI survives SPM's implicit mask
+  ...
+R/                      importing and plotting the results
 ```
 
-One function per file, named after the function. To change how smoothing works,
-open `matlab/steps/smooth_bold_files.m`; to change the topup→VDM conversion,
-`matlab/fieldmap/convert_topup_to_vdm.m`.
-
----
-
-## Checking a preprocessing trial
-
-Before committing a preprocessing run to GridCAT, measure how much of each ROI
-mask will actually carry a value in the GLM:
-
-```bash
-bash tools/check_roi_coverage.sh --trial sep4_fwhm5
-```
-
-It reproduces SPM's implicit mask — a voxel is kept only if it clears
-`maskingThreshold x global` in **every** scan, with the global computed per
-scan — and reports, per subject/session/hemisphere, how many mask voxels
-survive across a range of thresholds.
-
-Two columns decide what to do:
-
-- **`no_data`** — voxels with essentially no signal. These are dropout or a
-  misplaced mask. No threshold recovers them; the fix is the acquisition or
-  the coregistration.
-- **`n_<thr>`** — voxels that would carry a value at that threshold. Set
-  `C.GLM.maskingThreshold` in `spm_options.m` to the lowest threshold still on
-  the flat part of the curve.
-
-Every run appends to `roi_coverage.csv` with the `--trial` label as a column,
-so trials are directly comparable:
-
-```bash
-bash tools/check_roi_coverage.sh --trial sep15_fwhm1
-bash tools/check_roi_coverage.sh --trial sep4_fwhm5
-```
-
-```r
-cov <- readr::read_csv("roi_coverage.csv")
-cov |> dplyr::group_by(trial) |> dplyr::summarise(median(pct_0.80), median(pct_0.50))
-```
-
-Use `--sub sub-05s17` to check one subject while iterating, and `--deriv DIR`
-to point at a derivatives tree other than the one `config.sh` names.
+One function per file, named after the function.
 
 ---
 
 ## Troubleshooting
 
 **Check what a run actually did.** Every output session carries
-`preproc_provenance.json` (what ran, on which inputs, which software versions)
-plus verbatim copies of the `config.sh` and `spm_options.m` that produced it.
-`preproc_stages.log` accumulates one line per run, so a resumed run does not
-erase the history.
+`preproc_provenance.json` plus verbatim copies of the `config.sh` and
+`spm_options.m` that produced it; every GLM output folder carries
+`run_info.tsv`.
 
-**Unwarping looks wrong.** The job log prints the peak VDM shift. A plausible EPI
-distortion is a few voxels; tens of voxels means the readout time or the field
-units are wrong. If the corrected images look *more* distorted than the
-originals, that is a sign-convention error, not a magnitude error.
+**Unwarping looks wrong.** The job log prints the peak VDM shift. A plausible
+EPI distortion is a few voxels; tens of voxels means the readout time or the
+field units are wrong. Corrected images looking *more* distorted is a
+sign-convention error.
 
-**The settings you changed had no effect.** Check they belong to the mode you are
-running. In `topup` mode the SPM FieldMap toolbox is never called, so everything
-under `C.fieldmap` in `spm_options.m` is inert; in `realign_unwarp` mode it is
-`C.topup` that does nothing.
+**A setting had no effect.** Check it belongs to the mode you are running: in
+`topup` mode everything under `C.fieldmap` is inert, in `realign_unwarp` mode
+it is `C.topup` that does nothing.
 
-**Jobs.** `squeue -u $USER` to watch, `scancel <id>` to stop. SLURM logs land in
-`logs/`.
-
-**A stage printed its banner and then stopped.** `module` is usually a shell
-function from the login profile, not a real command, so it does not exist
-inside a non-interactive `bash script.sh`. Every stage now says
-`NOTE: no 'module' command available` and carries on with whatever is on PATH,
-then fails with a clear message if `matlab` is genuinely missing. If you see
-`module: command not found` you are on an older copy of these scripts.
+**Jobs.** `squeue -u $USER` to watch, `scancel <id>` to stop. SLURM logs land
+in `logs/`.

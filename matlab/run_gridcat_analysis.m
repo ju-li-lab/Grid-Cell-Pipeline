@@ -1,36 +1,22 @@
 function run_gridcat_analysis(cfgFile, subjectListFile)
-% RUN_GRIDCAT_ANALYSIS  Run the GridCAT analysis (GLM1 + GLM2) for all subjects and sessions.
+% RUN_GRIDCAT_ANALYSIS  GridCAT GLM1 + GLM2 for all subject-sessions.
 %
-% Usage:
-%   run_gridcat_analysis()                              % Auto-detects config.sh
-%   run_gridcat_analysis('config.sh')        % Current directory
-%   run_gridcat_analysis('/full/path/config.sh')  % Explicit path
-%   run_gridcat_analysis(cfgFile, 'subses_list.txt')   % Only process subjects in list
+%   run_gridcat_analysis('/path/config.sh', 'subses_list.txt')
 %
-% This function:
-%   1. Reads all settings from config.sh (or auto-detects it).
-%   2. Finds all EventData files, functional scans, motion regressors, and ROI masks.
-%   3. Optionally filters to only process subject-sessions in subjectListFile.
-%   4. Runs GLM1 (first-level GLM) for each subject-session.
-%   5. Runs GLM2 (grid orientation analysis) using the ROI masks you specify.
-%   6. Exports grid metrics (the main output you care about).
+% Reads config.sh + spm_options.m, matches event tables to functionals,
+% motion regressors and ROI masks in GLM_runauto, runs GLM1 and GLM2 per
+% session, and exports per session x ROI:
+%   <sub>_<ses>_<roi>_grid_metrics.txt   GridCAT's grid metrics
+%   <sub>_<ses>_<roi>_voxel_ori.csv      per-voxel grid orientation per run
+% plus one run_info.tsv for the whole output folder, recording the settings
+% that produced it (read by R/import_gridcat.R).
 %
-% Before running, configure the settings in config.sh.
-% Everything else should work without changes.
-%
-% HOW TO RUN (on the HPC via SLURM):
-%   Use the accompanying 03_gridcat.sh script, or manually:
-%     sbatch --time=08:00:00 --mem=32G --cpus-per-task=8 \
-%            --wrap="module load matlab/R2024b; matlab -nodisplay -r run_gridcat_analysis"
-
+% Run it through 03_gridcat.sh.
 
 %% =====================================================================
 %%                      READ CONFIGURATION
 %% =====================================================================
 
-% Settings come from two files, each read by the language that uses it:
-%   config.sh       paths, prefixes and modes, as plain strings
-%   spm_options.m   the GLM parameters, as MATLAB values
 if nargin < 1 || isempty(cfgFile)
     cfgFile = fullfile(fileparts(mfilename('fullpath')), 'config.sh');
 end
@@ -52,9 +38,7 @@ OPT = spm_options();
 NFS_OUTPUT_ROOT = cfg.OUTPUT_ROOT;
 ROOT_DIR = fullfile(NFS_OUTPUT_ROOT, 'GLM_runauto');
 
-% ---- Variant-aware output folder ----
-% RUN_VARIANT lets several GridCAT analyses coexist under one OUTPUT_ROOT:
-% empty -> GLM_output, otherwise GLM_output_<variant>.
+% RUN_VARIANT names the output folder: empty -> GLM_output, else GLM_output_<variant>.
 RUN_VARIANT_RAW = cfg_or(cfg, 'RUN_VARIANT', '');
 SAFE_VARIANT = regexprep(RUN_VARIANT_RAW, '[^A-Za-z0-9._-]+', '_');
 SAFE_VARIANT = regexprep(SAFE_VARIANT, '^_+|_+$', '');
@@ -74,13 +58,8 @@ GRIDCAT_DIR = cfg.GRIDCAT_DIR;
 CIRCSTAT_DIR = cfg_or(cfg, 'CIRCSTAT_DIR', fullfile(GRIDCAT_DIR, 'CircStat2012a'));
 
 % ---- File prefixes ----
-% FUNC_PREFIX is derived, not stored: SPM prepends RESLICE_PREFIX when it
-% reslices and SMOOTH_PREFIX on top when smoothing runs. The shell side
-% derives it the same way, in func_prefix() in bids_common.sh.
-% SPM prepends, so the prefixes stack in stage order, and SLICETIME_ORDER
-% decides which side the slice-timing letter lands on:
-%   raw -> a (slice timing) -> u (reslice) -> s (smooth)  =>  "sua"
-%   raw -> u (reslice) -> a (slice timing) -> s (smooth)  =>  "sau"
+% FUNC_PREFIX is derived, not stored - same rule as func_prefix() in
+% bids_common.sh: u, su, ua/au, sua/sau.
 RESLICE_PREFIX   = cfg_or(cfg, 'RESLICE_PREFIX', 'u');
 SMOOTH_PREFIX    = cfg_or(cfg, 'SMOOTH_PREFIX',  's');
 SLICETIME_PREFIX = cfg_or(cfg, 'SLICETIME_PREFIX', 'a');
@@ -102,6 +81,14 @@ ERC_PREFIX = cfg_or(cfg, 'ROI_PREFIX', 'r');
 % ---- ROIs ----
 ROI_MODE  = cfg_or(cfg, 'ROI_MODE',  'both');
 ROI_LABEL = cfg_or(cfg, 'ROI_LABEL', 'ErC');
+
+% tSNR-filtered masks (tools/roi_tsnr) live in GLM_runauto/ROI_tsnr.
+ROI_TSNR_FILTER = any(strcmp(cfg_or(cfg, 'ROI_TSNR_FILTER', '0'), {'1','true'}));
+if ROI_TSNR_FILTER
+    ROI_DIRNAME = 'ROI_tsnr';
+else
+    ROI_DIRNAME = 'ROI';
+end
 
 % ---- Task filtering ----
 INCLUDE_TASKS = {};  % Currently unused from config, can be extended
@@ -158,6 +145,7 @@ fprintf('  ROI prefix:         %s\n\n', ERC_PREFIX);
 
 fprintf('ROI & ANALYSIS SETTINGS:\n');
 fprintf('  ROI mode:           %s\n', ROI_MODE);
+fprintf('  ROI tSNR filter:    %d (masks from %s)\n', ROI_TSNR_FILTER, ROI_DIRNAME);
 fprintf('  TR:                 %.2f seconds\n', GLM_TR);
 fprintf('  X-fold symmetry:    %d\n', X_FOLD);
 fprintf('  Masking threshold:  %.2f\n', MASKING_THR);
@@ -199,6 +187,10 @@ assert(exist(CIRCSTAT_DIR, 'dir') == 7, 'CIRCSTAT_DIR not found: %s', CIRCSTAT_D
 
 if ~exist(OUTPUT_ROOT, 'dir'); mkdir(OUTPUT_ROOT); end
 
+% One row of settings per GridCAT run, next to the grid_metrics files.
+write_run_info(fullfile(OUTPUT_ROOT, 'run_info.tsv'), OUTPUT_FOLDER, cfg, OPT, ...
+               FUNC_PREFIX, ROI_TSNR_FILTER);
+
 % Add toolboxes to MATLAB path
 addpath(SPM_DIR);
 addpath(GRIDCAT_DIR);
@@ -228,10 +220,8 @@ fprintf('OUTPUT_ROOT = %s\n\n', OUTPUT_ROOT);
 %% =====================================================================
 %%              STAGE DATA TO LOCAL SCRATCH (optional)
 %% =====================================================================
-% When USE_LOCAL_SCRATCH=true, copies input data from NFS to node-local
-% storage before processing. This eliminates the NFS I/O bottleneck for
-% the many small .nii read/writes that SPM GLM estimation produces.
-% Results are copied back to NFS at the end.
+% USE_LOCAL_SCRATCH=true copies the input to node-local storage first and the
+% results back at the end, bypassing the NFS I/O bottleneck.
 
 NFS_OUTPUT_DIR = OUTPUT_ROOT;  % Remember NFS destination for results
 localScratchDir = '';
@@ -335,7 +325,12 @@ end
 eventDir = fullfile(ROOT_DIR, 'EventFiles', 'Event_tables');
 rpDir    = fullfile(ROOT_DIR, 'rp_txt');
 funcDir  = fullfile(ROOT_DIR, 'functional_scans_split');
-roiDir   = fullfile(ROOT_DIR, 'ROI');
+roiDir   = fullfile(ROOT_DIR, ROI_DIRNAME);
+if ROI_TSNR_FILTER
+    assert(isfolder(roiDir), [ ...
+        'ROI_TSNR_FILTER=1 but there is no %s.\n' ...
+        'Run tools/roi_tsnr/run_roi_tsnr_filter.sh first, or set ROI_TSNR_FILTER=0.'], roiDir);
+end
 
 % Fall back to recursive scan only if the known subdirectories don't exist
 if exist(eventDir, 'dir') && exist(rpDir, 'dir') && exist(funcDir, 'dir')
@@ -350,7 +345,7 @@ else
     eventFiles = dir(fullfile(ROOT_DIR, '**', '*EventData.txt'));
     rpAll      = dir(fullfile(ROOT_DIR, '**', 'rp*.txt'));
     funcAll    = dir(fullfile(ROOT_DIR, '**', [FUNC_PREFIX '*_bold_*.nii']));
-    roiAll     = dir(fullfile(ROOT_DIR, '**', [ERC_PREFIX '*.nii']));
+    roiAll     = dir(fullfile(roiDir, [ERC_PREFIX '*.nii']));
     fprintf('  Recursive index: %d events, %d rp, %d func, %d ROI files (%.1fs)\n', ...
         numel(eventFiles), numel(rpAll), numel(funcAll), numel(roiAll), toc(tIndex));
 end
@@ -373,11 +368,8 @@ rpFolders = {rpAll.folder};
 funcNames   = {funcAll.name};
 funcFolders = {funcAll.folder};
 
-% --- Which run of each task was preprocessed --------------------------------
-% prepare_gridcat_directory.m flattens one run per task into GLM_runauto and
-% records which one in run_manifest.tsv. Event tables are matched against that:
-% a table naming a run the pipeline did not preprocess is not the right table
-% for this data, and a table naming no run at all belongs to whichever run was.
+% Which run of each task was preprocessed (run_manifest.tsv): event tables
+% are matched against it, and a run-less table belongs to whichever run was.
 runManifest = load_run_manifest(fullfile(ROOT_DIR, 'run_manifest.tsv'));
 if runManifest.Count > 0
     fprintf('Run manifest: %d task entries.\n', runManifest.Count);
@@ -388,8 +380,6 @@ else
 end
 
 % --- Parse each EventData file to build a list of runs ---
-% The run entity is optional and captured separately: event tables are often
-% exported without one.
 patEvent = ['^(?<sub>sub-[^_]+)_(?<ses>ses-[^_]+)_(?<task>task-[A-Za-z0-9]+)' ...
             '(?<rest>.*)EventData\.txt$'];
 
@@ -445,9 +435,7 @@ for i = 1:numel(eventFiles)
     run.task = tok.task;
     run.eventFile = fullfile(eventFiles(i).folder, eventFiles(i).name);
 
-    % --- Find motion regressor from pre-indexed list ---
-    % The preparation writes rp_<sub>_<ses>_<task>.txt, so try that exact name
-    % before falling back to a substring search over older layouts.
+    % Motion regressor: exact name first, then substring over older layouts.
     rpWanted = sprintf('rp_%s_%s_%s.txt', tok.sub, tok.ses, tok.task);
     rpIdx = find(strcmp(rpNames, rpWanted), 1);
     if isempty(rpIdx)
@@ -748,6 +736,11 @@ function run_one_session(thisRuns, roi, OUTPUT_ROOT, ROI_MODE, ROI_LABEL, ...
         % Export the grid metrics (this is the main result)
         outFile = {fullfile(OUTPUT_ROOT, sprintf('%s_%s_%s_grid_metrics.txt', sub, ses, roiLabel))};
         gridMetric_export({roiPath}, GLM1dir, GLM2dir, outFile);
+
+        % Per-voxel grid orientation per run, for the R stability plots
+        export_voxel_ori(roiPath, GLM1dir, ...
+            fullfile(OUTPUT_ROOT, sprintf('%s_%s_%s_voxel_ori.csv', sub, ses, roiLabel)), ...
+            sub, ses, roiLabel);
     end
 
     fprintf('  Done %s %s.\n', sub, ses);
@@ -781,10 +774,8 @@ end
 
 
 function roiPath = find_roi_from_index(roiNames, roiFolders, sub, ses, side, roiLabel, failFast)
-% Finds a specific ROI mask from the pre-indexed ROI file list.
-% Filters for names containing the subject, session, the anatomical label
-% (ROI_LABEL in config.sh) and the side. The label was hardcoded 'ErC',
-% which meant any other structure silently matched nothing.
+% One ROI mask from the pre-indexed list, filtered on subject, session,
+% anatomical label and side.
     roiPath = '';
 
     if ~ismember(lower(side), {'bilat', 'left', 'right'})
@@ -952,5 +943,84 @@ function gb = dir_size_gb(dirPath)
         gb = str2double(tok{1}) / 1e9;
     else
         gb = NaN;
+    end
+end
+
+
+function write_run_info(path, outputFolder, cfg, OPT, funcPrefix, roiTsnrFilter)
+% WRITE_RUN_INFO  One-row TSV recording the settings behind this GridCAT run.
+% R/import_gridcat.R joins it onto every result row, so runs can be compared
+% without encoding the settings in file names.
+    cols = { ...
+        'gridcat_run',             outputFolder; ...
+        'created',                 datestr(now, 'yyyy-mm-dd HH:MM:SS'); ...
+        'xfold_symmetry',          num2str(OPT.GLM.xFoldSymmetry); ...
+        'grid_regressor_method',   OPT.GLM.gridRegressorMethod; ...
+        'event_usage_glm1',        num2str(OPT.GLM.eventUsageSpecifier_GLM1); ...
+        'event_usage_glm2',        num2str(OPT.GLM.eventUsageSpecifier_GLM2); ...
+        'masking_threshold',       num2str(OPT.GLM.maskingThreshold); ...
+        'keep_unused_grid_events', num2str(OPT.GLM.keepUnusedGridEvents); ...
+        'avg_ori_across_runs',     num2str(OPT.GLM.avgOriAcrossRuns); ...
+        'use_voxel_weighting',     num2str(OPT.GLM.useVoxelWeighting); ...
+        'hpf_cutoff',              num2str(OPT.GLM.HPF_cutoff); ...
+        'smooth_fwhm',             cfg_or(cfg, 'SMOOTH_FWHM', '0'); ...
+        'slice_timing',            cfg_or(cfg, 'DO_SLICE_TIMING', '0'); ...
+        'slicetime_order',         cfg_or(cfg, 'SLICETIME_ORDER', 'before'); ...
+        'func_prefix',             funcPrefix; ...
+        'preproc_mode',            cfg_or(cfg, 'PREPROC_MODE', ''); ...
+        'roi_label',               cfg_or(cfg, 'ROI_LABEL', ''); ...
+        'roi_pattern_left',        cfg_or(cfg, 'ROI_PATTERN_LEFT', ''); ...
+        'roi_pattern_right',       cfg_or(cfg, 'ROI_PATTERN_RIGHT', ''); ...
+        'roi_mode',                cfg_or(cfg, 'ROI_MODE', 'both'); ...
+        'roi_tsnr_filter',         num2str(roiTsnrFilter) };
+
+    fid = fopen(path, 'w');
+    if fid < 0
+        warning('Could not write run info: %s', path);
+        return;
+    end
+    fprintf(fid, '%s\n', strjoin(cols(:,1)', sprintf('\t')));
+    fprintf(fid, '%s\n', strjoin(cols(:,2)', sprintf('\t')));
+    fclose(fid);
+    fprintf('Run info: %s\n', path);
+end
+
+
+function export_voxel_ori(roiPath, GLM1dir, outFile, sub, ses, roiLabel)
+% EXPORT_VOXEL_ORI  Per-voxel grid orientation per run, within one ROI mask.
+% Reads the voxelwiseGridOri_<event>_run<N>_deg images GridCAT wrote into the
+% GLM1 directory. One CSV row per voxel x run; NaN voxels are skipped.
+    try
+        imgs = dir(fullfile(GLM1dir, 'voxelwiseGridOri_*_run*_deg.nii'));
+        if isempty(imgs)
+            warning('No voxelwiseGridOri images in %s - voxel_ori.csv skipped.', GLM1dir);
+            return;
+        end
+
+        M   = niftiread(roiPath) > 0.5;
+        idx = find(M);
+        [vx, vy, vz] = ind2sub(size(M), idx);
+
+        fid = fopen(outFile, 'w');
+        if fid < 0
+            warning('Could not write %s', outFile);
+            return;
+        end
+        fprintf(fid, 'subject,session,roi,event,run,voxel,x,y,z,ori_deg\n');
+        for k = 1:numel(imgs)
+            tok = regexp(imgs(k).name, ...
+                '^voxelwiseGridOri_(.+)_run(\d+)_deg\.nii$', 'tokens', 'once');
+            if isempty(tok), continue; end
+            ori = niftiread(fullfile(imgs(k).folder, imgs(k).name));
+            v   = double(ori(idx));
+            for j = find(isfinite(v))'
+                fprintf(fid, '%s,%s,%s,%s,%s,%d,%d,%d,%d,%.4f\n', ...
+                    sub, ses, roiLabel, tok{1}, tok{2}, ...
+                    idx(j), vx(j), vy(j), vz(j), v(j));
+            end
+        end
+        fclose(fid);
+    catch ME
+        warning('voxel_ori export failed for %s %s %s: %s', sub, ses, roiLabel, ME.message);
     end
 end

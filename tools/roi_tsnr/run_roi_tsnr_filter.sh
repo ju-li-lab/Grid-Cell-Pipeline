@@ -2,51 +2,36 @@
 # =============================================================================
 #  Filter ROI voxels by tSNR - one job per subject x session
 # =============================================================================
-#  Look before you cut:
-#    bash tools/roi_tsnr/run_roi_tsnr_filter.sh --dry-run --local
+#  Rule: within each subject x session, drop every ROI voxel with
+#  tSNR < Q1 - 1.5*IQR of the pooled (left + right) ROI tSNR distribution.
+#  Runs on all sessions by default.
 #
-#  Then write the masks (left and right can differ - dropout is asymmetric):
-#    bash tools/roi_tsnr/run_roi_tsnr_filter.sh --keep 60,40
-#    bash tools/roi_tsnr/run_roi_tsnr_filter.sh --min-tsnr 45,55
+#    bash tools/roi_tsnr/run_roi_tsnr_filter.sh --dry-run --local   # look first
+#    bash tools/roi_tsnr/run_roi_tsnr_filter.sh                     # write masks
 #
-#  Submits a SLURM array, ONE TASK PER SUBJECT x SESSION, then a merge job.
-#  --local runs them one after another instead, which is what you want in an
-#  interactive session:  srun --pty -c 2 --mem 8G bash   then --local.
+#  Output defaults to <rois>_tsnr (GLM_runauto/ROI_tsnr), which is what
+#  03_gridcat.sh reads when ROI_TSNR_FILTER=1 in config.sh.
+#
+#  Submits a SLURM array (one task per subject x session) plus a merge job.
+#  --local runs them serially instead.
 #
 #  Options:
-#    --keep L,R       percent of each hemisphere to keep, by tSNR rank.
-#                     Default 50,50. One value sets both. RANK RULE: n stays
-#                     constant across subjects, which is what a group test
-#                     wants.
-#    --min-tsnr L,R   absolute tSNR cut instead. Overrides --keep. Lets n vary
-#                     between subjects, which weights them unequally.
-#    --dry-run        print the sweep table (100/75/50/25%) and write nothing.
+#    --dry-run        report only, write nothing.
 #    --deriv DIR      derivatives tree with the functionals.
 #                     Default OUTPUT_ROOT/derivatives/<DERIV_PREPROC>.
 #    --rois DIR       flat dir of r<sub>_<ses>_hemi-*_label-*_mask.nii.
 #                     Default OUTPUT_ROOT/GLM_runauto/ROI.
-#    --out DIR        default <rois>_tsnr_L<pct>_R<pct>, so the folder name is
-#                     the record. Filenames are unchanged, so config.sh needs
-#                     no edit - just point the ROI dir at the new folder.
+#    --out DIR        default <rois>_tsnr.
 #    --prefix P       functional prefix, default 'u' (unwarped, UNSMOOTHED).
-#                     Use 'ua' where slice timing ran first. NEVER 'su'.
-#    --combine WHICH  mean (default) or min across the three runs. min is
-#                     stricter and arguably right: SPM's implicit mask is an
-#                     intersection across runs, so the worst run already
-#                     decides whether a voxel survives.
-#    --sessions LIST  comma-separated, DEFAULT ses-01. 2 and 3 are post-
-#                     intervention: fix the voxel set on ses-01 and carry it
-#                     forward rather than re-selecting, or a tSNR shift between
-#                     sessions reads as an intervention effect.
-#    --all-sessions   every session instead.
+#                     Use 'ua' where slice timing ran first. Never 's*'.
+#    --combine WHICH  mean (default) or min across runs.
+#    --sessions LIST  comma-separated, default all sessions.
 #    --sub SUB        limit to one subject (repeatable).
 #    --tasks LIST     comma-separated task numbers, default 1,2,3.
 #    --hpf SEC        high-pass, default 128, matching GLM.HPF_cutoff.
 #    --min-voxels N   refuse to write a mask below this, default 5.
 #    --local          run here, serially, no SLURM.
 #    -h, --help       this text.
-#
-#  THIS WHOLE DIRECTORY IS OPTIONAL. Nothing in the pipeline calls it.
 # =============================================================================
 
 set -euo pipefail
@@ -57,15 +42,13 @@ CONFIG_FILE="${ROOT_DIR}/config.sh"
 
 TRIAL="$(date +%Y%m%d_%H%M%S)"
 DERIV_IN=""; ROIS=""; OUT=""
-KEEP="50,50"; MINT=""; PREFIX="u"; COMBINE="mean"
-SESSIONS="ses-01"; TASKS_IN="1,2,3"; HPF=128; MINVOX=5
+PREFIX="u"; COMBINE="mean"
+SESSIONS=""; TASKS_IN="1,2,3"; HPF=128; MINVOX=5
 DRY="false"; LOCAL="false"
 SUBS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --keep)         KEEP="$2";      shift 2 ;;
-        --min-tsnr)     MINT="$2";      shift 2 ;;
         --dry-run)      DRY="true";     shift ;;
         --deriv)        DERIV_IN="$2";  shift 2 ;;
         --rois)         ROIS="$2";      shift 2 ;;
@@ -73,14 +56,13 @@ while [[ $# -gt 0 ]]; do
         --prefix)       PREFIX="$2";    shift 2 ;;
         --combine)      COMBINE="$2";   shift 2 ;;
         --sessions)     SESSIONS="$2";  shift 2 ;;
-        --all-sessions) SESSIONS="";    shift ;;
         --sub)          SUBS+=("$2");   shift 2 ;;
         --tasks)        TASKS_IN="$2";  shift 2 ;;
         --hpf)          HPF="$2";       shift 2 ;;
         --min-voxels)   MINVOX="$2";    shift 2 ;;
         --local)        LOCAL="true";   shift ;;
         -h|--help)
-            sed -n '2,50p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+            sed -n '2,36p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *) echo "ERROR: unknown option: $1" >&2; exit 1 ;;
     esac
@@ -92,10 +74,8 @@ case "$COMBINE" in
 esac
 case "$PREFIX" in
     s*) echo "ERROR: --prefix '$PREFIX' is a SMOOTHED series. tSNR on smoothed" >&2
-        echo "       data is a distance-to-edge map, not a voxel property:" >&2
-        echo "       5 mm FWHM on these voxels multiplies tSNR by 5.4, which is" >&2
-        echo "       an average over ~30 voxels, wider than the ROI itself." >&2
-        echo "       Use 'u' or 'ua'. See the README if you really mean it." >&2
+        echo "       data measures distance to the tissue edge, not the voxel." >&2
+        echo "       Use 'u' or 'ua'." >&2
         exit 1 ;;
 esac
 
@@ -110,20 +90,7 @@ source "${ROOT_DIR}/bids_common.sh"
 
 [[ -z "$DERIV_IN" ]] && DERIV_IN="${OUTPUT_ROOT}/derivatives/${DERIV_PREPROC:-spm-preproc}"
 [[ -z "$ROIS"     ]] && ROIS="${OUTPUT_ROOT}/GLM_runauto/ROI"
-
-# two numbers, or one meaning both
-to_pair() {
-    local v="$1" a b
-    a="${v%%,*}"; b="${v##*,}"
-    printf '[%s %s]' "$a" "$b"
-}
-KEEP_PCT="$(to_pair "$KEEP")"
-MIN_TSNR="[]"
-if [[ -n "$MINT" ]]; then
-    MIN_TSNR="$(to_pair "$MINT")"
-    [[ -z "$OUT" ]] && OUT="${ROIS}_tsnr_Labs${MINT%%,*}_Rabs${MINT##*,}"
-fi
-[[ -z "$OUT" ]] && OUT="${ROIS}_tsnr_L${KEEP%%,*}_R${KEEP##*,}"
+[[ -z "$OUT"      ]] && OUT="${ROIS}_tsnr"
 RTF_TASKS="[${TASKS_IN//,/ }]"
 
 [[ -d "$DERIV_IN" ]] || { echo "ERROR: no derivatives tree at: $DERIV_IN" >&2; exit 1; }
@@ -156,11 +123,7 @@ echo "  ROI tSNR filter"
 echo "  Trial:       ${TRIAL}"
 echo "  Functionals: ${DERIV_IN}  (${PREFIX}sub-*, unsmoothed)"
 echo "  ROI masks:   ${ROIS}"
-if [[ -n "$MINT" ]]; then
-    echo "  Rule:        tSNR >= ${MINT%%,*} (left), >= ${MINT##*,} (right)"
-else
-    echo "  Rule:        keep top ${KEEP%%,*}% (left), ${KEEP##*,}% (right)"
-fi
+echo "  Rule:        drop voxels with tSNR < Q1 - 1.5*IQR (per subject x session)"
 echo "  Runs:        tasks ${TASKS_IN}, combined by ${COMBINE}"
 echo "  Jobs:        ${#WORK[@]} (subject x session)"
 [[ "$DRY" == "true" ]] && echo "  DRY RUN - nothing will be written"
@@ -168,7 +131,7 @@ echo "  Out:         ${OUT}"
 echo "============================================"
 
 export DERIV_ROOT_IN="$DERIV_IN" ROI_DIR="$ROIS" OUT_DIR="$OUT" WORK_LIST
-export KEEP_PCT MIN_TSNR RTF_TASKS TRIAL
+export RTF_TASKS TRIAL
 export FUNC_PREFIX="$PREFIX" COMBINE HPF_SEC="$HPF" MIN_VOXELS="$MINVOX" DRY_RUN="$DRY"
 export PIPELINE_SCRIPT_DIR="$ROOT_DIR" ROI_TSNR_DIR="$SELF_DIR"
 
@@ -211,4 +174,4 @@ if [[ "$DRY" != "true" ]]; then
 fi
 echo
 echo "watch:  squeue -j ${ARRAY_ID}"
-echo "then:   column -s, -t ${OUT}/roi_tsnr_sweep.csv | less -S"
+echo "then:   column -s, -t ${OUT}/roi_tsnr.csv | less -S"

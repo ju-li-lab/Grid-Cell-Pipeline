@@ -2,49 +2,25 @@
 # =============================================================================
 #  bids_common.sh — shared helpers for the BIDS derivatives layout
 # =============================================================================
-#  Sourced by the shell scripts of the pipeline. Nothing here runs on its own.
-#
-#      source "${SCRIPT_DIR}/bids_common.sh"
-#
-#  It expects config.sh to have been sourced first, and provides:
-#
-#    Derivative paths
-#      deriv_root                       <OUTPUT_ROOT>/derivatives, or DERIV_ROOT
-#      deriv_dataset <name>             one derivative dataset inside it
-#      deriv_preproc / deriv_rois / deriv_fieldmaps
-#      deriv_session <dataset> <sub> <ses> [<modality>]
-#      write_dataset_description <dir> <name> <description>
-#
-#    Resetting the preprocessing derivatives
-#      stages_reset_from_scratch <stages> <mode>   is this a from-scratch run?
-#      reset_preproc_deriv [<sub> <ses>]           wipe all of it, or one session
-#
-#    Reading BIDS filenames and sidecars
-#      bids_entity <filename> <entity>  e.g. bids_entity "$f" run  ->  2
-#      bids_strip_ext <filename>
-#      json_field <json> <field>
-#      acq_seconds <nifti>              acquisition time from the JSON sidecar
-#
-#    Run selection (run_selection.tsv)
-#      run_selection_get <tsv> <sub> <ses> <type>
-#
-#  Everything writes to stdout and returns non-zero when it has nothing to say,
-#  so the callers can use  x="$(f ...)" || x=""  without set -e killing them.
+#  Sourced by the pipeline's shell scripts, after config.sh. Provides the
+#  derivative paths, derivative resetting, BIDS filename/sidecar reading and
+#  run-selection helpers. Everything writes to stdout and returns non-zero
+#  when it has nothing to say, so callers can  x="$(f ...)" || x=""  safely.
 # =============================================================================
 
 # Guard against double-sourcing
 [[ -n "${_BIDS_COMMON_SOURCED:-}" ]] && return 0
 _BIDS_COMMON_SOURCED=1
 
+# This file lives in the pipeline directory (or a snapshot of it), which is
+# where run_selection.tsv lives too.
+_BIDS_COMMON_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # -----------------------------------------------------------------------------
 #  Derivative paths
 # -----------------------------------------------------------------------------
 
 # The root that holds every derivative dataset this pipeline writes.
-#
-# Returns 1 when neither DERIV_ROOT nor OUTPUT_ROOT is set. Callers that assign
-# the result under "set -e" would otherwise exit with no output at all, so say
-# what is missing on the way out.
 deriv_root() {
     if [[ -n "${DERIV_ROOT:-}" ]]; then
         printf '%s' "${DERIV_ROOT%/}"
@@ -68,18 +44,9 @@ deriv_preproc()    { deriv_dataset "${DERIV_PREPROC:-spm-preproc}"; }
 deriv_rois()       { deriv_dataset "${DERIV_ROIS:-rois}"; }
 deriv_fieldmaps()  { deriv_dataset "${DERIV_FIELDMAPS:-fieldmaps}"; }
 
-# ---------------------------------------------------------------------------
-#  Loading environment modules
-# ---------------------------------------------------------------------------
-#  `module` is usually a shell FUNCTION defined by the login profile, not a
-#  real command, so it does not exist in a non-interactive `bash script.sh`.
-#  Calling it unguarded under `set -e` kills the script at exit 127 before it
-#  does any work - which is exactly what used to happen when you ran
-#  02_prepare_gridcat.sh or 03_gridcat.sh by hand.
-#
-#  load_modules <name>...  loads each module if the module system is there,
-#                          and otherwise says so and carries on with whatever
-#                          is already on PATH.
+# load_modules <name>...  loads each module if the module system is there
+# (`module` is a login-profile function, absent in non-interactive shells),
+# otherwise carries on with whatever is already on PATH.
 load_modules() {
     if ! command -v module >/dev/null 2>&1; then
         echo "NOTE: no 'module' command available - using what is on PATH."
@@ -105,27 +72,15 @@ require_command() {
     fi
 }
 
-# The prefix the preprocessed BOLD files actually carry, derived rather
-# than stored: SPM prepends RESLICE_PREFIX when it reslices, and
-# SMOOTH_PREFIX on top of that when smoothing runs. Keeping this as its
-# own config key meant it could disagree with what SPM had written, and
-# it did.
-# SLICETIME_ORDER decides which side the slice-timing letter lands on,
-# because SPM prepends in the order the stages ran:
-#   plain                                      -> u
-#   SMOOTH_FWHM>0                              -> su
-#   DO_SLICE_TIMING=1, SLICETIME_ORDER=before   -> ua
-#   DO_SLICE_TIMING=1, SLICETIME_ORDER=after    -> au
-#   both, before / after                        -> sua / sau
+# The prefix the preprocessed BOLD files carry, derived rather than stored.
+# SPM prepends in stage order: u, su, ua/au, sua/sau. Same rule as
+# CFG.BOLD_PREFIX in run_spm_preproc.m - change one, change the other.
 func_prefix() {
     local reslice="${RESLICE_PREFIX:-u}" smooth="${SMOOTH_PREFIX:-s}"
     local stc="${SLICETIME_PREFIX:-a}"
     local fwhm="${SMOOTH_FWHM:-0}" dostc="${DO_SLICE_TIMING:-0}"
     local order="${SLICETIME_ORDER:-before}"
 
-    # SPM prepends, so the prefixes stack inwards-out in stage order:
-    #   raw -> a (slice timing) -> u (reslice) -> s (smooth)  =>  "sua"
-    #   raw -> u (reslice) -> a (slice timing) -> s (smooth)  =>  "sau"
     local p="$reslice"
     if [[ "$dostc" == "1" || "$dostc" == "true" ]]; then
         if [[ "$order" == "after" ]]; then
@@ -134,8 +89,6 @@ func_prefix() {
             p="${reslice}${stc}"
         fi
     fi
-    # Non-zero and non-empty means smoothing ran. Compared as a string so
-    # a decimal like 2.5 works without needing bc.
     if [[ -n "$fwhm" && "$fwhm" != "0" && "$fwhm" != "0.0" ]]; then
         p="${smooth}${p}"
     fi
@@ -210,15 +163,8 @@ stages_reset_from_scratch() {
     return 1
 }
 
-# Should the derivatives be wiped for this stage list? Honours DERIV_RESET.
-# Whether to clear the preprocessing derivatives before this run.
-#
-# NOTE: this rule also exists in MATLAB, in deriv_reset_wanted() inside
-# run_spm_preproc.m. Both are needed and neither is redundant: this one runs
-# once before an array is submitted (so sessions dropped from the subject
-# list do not survive), the MATLAB one runs per session at job start (so
-# calling 01_preprocess.sbatch directly still clears). Change one, change
-# the other.
+# Whether to clear the preprocessing derivatives before this run. The same
+# rule exists in MATLAB (run_spm_preproc.m) - change one, change the other.
 deriv_reset_wanted() {
     local stages="${1:-all}" mode="${2:-}"
     case "${DERIV_RESET:-auto}" in
@@ -228,12 +174,8 @@ deriv_reset_wanted() {
     esac
 }
 
-# reset_preproc_deriv [<sub> <ses>]
-#   No arguments: wipe the whole preprocessing derivative dataset.
-#   With sub/ses: wipe only that session, which is what an array task does.
-#
-#   Refuses to delete anything that is not below the derivatives root, so a
-#   mistyped DERIV_ROOT cannot take out a data directory.
+# reset_preproc_deriv [<sub> <ses>]  — wipe the whole preprocessing dataset,
+# or one session. Refuses to delete anything outside the derivatives root.
 reset_preproc_deriv() {
     local sub="${1:-}" ses="${2:-}"
     local base target root
@@ -374,10 +316,6 @@ PY
 # run_selection_get <tsv> <sub> <ses> <type>
 #   Prints the selected run for one entry, e.g. "run-2". Nothing when the file
 #   does not exist, the row is missing, or the choice was left blank.
-#
-#   Column positions are read from the header when there is one, so the old
-#   five-column file (subject session type available_runs selected_run) and
-#   the current one both work.
 run_selection_get() {
     local tsv="$1" sub="$2" ses="$3" type="$4"
     [[ -f "$tsv" ]] || return 1
@@ -411,13 +349,9 @@ sys.exit(1)
 PY
 }
 
-# The path of the run selection file, honouring RUN_SELECTION_FILE.
+# The run selection file always lives in the pipeline directory.
 run_selection_file() {
-    if [[ -n "${RUN_SELECTION_FILE:-}" ]]; then
-        printf '%s' "$RUN_SELECTION_FILE"
-    else
-        printf '%s' "${SCRIPT_DIR:-.}/run_selection.tsv"
-    fi
+    printf '%s' "${_BIDS_COMMON_DIR}/run_selection.tsv"
 }
 
 

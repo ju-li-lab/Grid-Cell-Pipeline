@@ -2,9 +2,8 @@
 # =============================================================================
 #  SPM Preprocessing — standalone stage submitter
 # =============================================================================
-#  Runs the SPM preprocessing (or just some of its stages) without going
-#  on its own, outside run_all.sh. SLURM resources, paths and
-#  defaults all come from config.sh.
+#  Runs the SPM preprocessing (or just some of its stages) on its own,
+#  outside run_all.sh. SLURM resources, paths and defaults come from config.sh.
 #
 #  Common uses:
 #    # everything, whole subject list (same as menu option 2)
@@ -53,9 +52,6 @@
 
 set -euo pipefail
 
-# Where this script and its siblings live. Kept separate from the config's
-# SCRIPT_DIR. (The config calls its own copy PIPELINE_DIR, so sourcing it
-# no longer silently overwrites ours.)
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 CONFIG_FILE="${SELF_DIR}/config.sh"
@@ -108,20 +104,14 @@ if [[ ! -f "$SBATCH_SCRIPT" ]]; then
     exit 1
 fi
 
-# The config sets PIPELINE_DIR to the pipeline's script directory on the
-# cluster — that is where subses_list.txt lives. Fall back to our own
-# location when running from a checkout that has not set it. Fall back to this script's own
-# directory when the config does not set it.
+# subses_list.txt lives in PIPELINE_DIR; fall back to this checkout.
 LIST_DIR="${PIPELINE_DIR:-$SELF_DIR}"
 
 [[ -z "$STAGES" ]] && STAGES="${PREPROC_STAGES:-all}"
 STAGES="${STAGES// /}"
 
-# ---- Validate the stage names before anything is submitted ----
-# Kept in step with resolve_stages() in matlab/run_spm_preproc.m, which is
-# what actually runs them. Where 'slicetime' sits relative to 'realign' is
-# SLICETIME_ORDER's business, not this list's: every stage name is valid in
-# either order, and MATLAB puts them in the right sequence.
+# Validate stage names before submitting. Kept in step with resolve_stages()
+# in matlab/run_spm_preproc.m.
 VALID_STAGES="topup vdm slicetime stc slice_timing slice-timing realign coreg smooth all fieldmap fieldmaps fmap post_fieldmap postfieldmap post-fieldmap unwarp realign_unwarp"
 IFS=',' read -ra _stage_parts <<< "$STAGES"
 for _s in "${_stage_parts[@]}"; do

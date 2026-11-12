@@ -7,35 +7,16 @@ function outFiles = slice_time_correct(boldFiles, CFG)
 % front). Runs with no BOLD are passed through as empty.
 %
 % boldFiles is the raw staged BOLD with SLICETIME_ORDER=before and
-% realignment's output with SLICETIME_ORDER=after. Nothing here changes
-% between the two: the correction is in time only, so it does not care
-% whether the series has been resliced, and the slice times come from the
-% sidecar of the file the series descends from (see find_sidecar).
+% realignment's output with SLICETIME_ORDER=after.
 %
-% WHY THE TIMES AND NOT THE ORDER
-% -------------------------------
-% SPM accepts either a slice ORDER (1:30, 30:-1:1, an interleaved vector)
-% or the actual slice TIMES. This uses the times, read from each run's own
-% JSON sidecar, because an order has to be guessed and a guess here is
-% expensive: correcting with the wrong order is worse than not correcting
-% at all. The times come from the scanner.
+% Uses the slice TIMES from each run's own JSON sidecar, never a guessed
+% order: correcting with the wrong order is worse than not correcting. SPM
+% switches to slice-times mode when any `so` value exceeds nslices; refslice
+% is then a TIME in ms and `ta` must be 0.
 %
-% For this dataset the protocol sheet says "Multi-Slice Mode: Interleaved"
-% while the DICOM says sequential descending (30 -> 1). The DICOM wins -
-% it records what happened rather than what was programmed - and reading
-% the JSON means the question never has to be answered by hand.
-%
-% SPM switches into slice-times mode on its own when any value in `so`
-% exceeds nslices, and then `refslice` is a TIME in the same units (ms),
-% not a slice index. `ta` is ignored and must be 0.
-%
-% THE REFERENCE POINT MATTERS DOWNSTREAM
-% --------------------------------------
-% Everything is shifted to CFG.spm.slicetime.ref_fraction of the TR.
-% At 0.5 (the middle) the data then matches SPM's microtime default of
-% T0 = T/2, which is what GridCAT's microtimeOnset/microtimeResolution
-% express. Change one and you must change the other, so this function
-% checks the pair and says so if they disagree.
+% Everything is shifted to CFG.spm.slicetime.ref_fraction of the TR, which
+% must match the GLM's microtimeOnset/microtimeResolution; the pair is
+% checked below.
 
 nTasks   = numel(boldFiles);
 outFiles = cell(nTasks, 1);

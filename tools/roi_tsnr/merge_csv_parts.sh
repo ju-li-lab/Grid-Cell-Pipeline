@@ -18,13 +18,8 @@ merge_one() {
     echo "  $(( $(wc -l < "${OUT_DIR}/${name}.csv") - 1 )) rows from $# parts -> ${OUT_DIR}/${name}.csv"
 }
 
-sweeps=( "${PARTS}"/roi_tsnr_*_sweep.csv )
-mains=()
-for f in "${PARTS}"/roi_tsnr_*.csv; do
-    [[ "$f" == *_sweep.csv ]] || mains+=( "$f" )
-done
+mains=( "${PARTS}"/roi_tsnr_*.csv )
 
 # "${arr[@]}" on an EMPTY array is an unbound-variable error under set -u in
-# bash before 4.4, and a dry run leaves both empty.
-merge_one roi_tsnr       ${mains[@]+"${mains[@]}"}
-merge_one roi_tsnr_sweep ${sweeps[@]+"${sweeps[@]}"}
+# bash before 4.4, and a dry run leaves it empty.
+merge_one roi_tsnr ${mains[@]+"${mains[@]}"}

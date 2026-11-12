@@ -33,8 +33,4 @@ slprj/
 # Claude and other
 .claude
 *claude*
-docs/pipeline-map/gen_canvas.py
-docs/pipeline-map/GridCAT Pipeline Map.canvas
-docs/pipeline-map/gridcat-pipeline-map.html
-/docs/pipeline-map
 .Rproj.user

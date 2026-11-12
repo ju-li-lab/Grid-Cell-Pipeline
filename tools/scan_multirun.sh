@@ -22,8 +22,7 @@
 #
 # Options:
 #   --list FILE     Only scan the subject-sessions in this list.
-#   --output FILE   Where to write (default: RUN_SELECTION_FILE, or
-#                   <script dir>/run_selection.tsv).
+#   --output FILE   Where to write (default: <pipeline dir>/run_selection.tsv).
 #   --gap-minutes N Scans further apart than this are different blocks
 #                   (default: RUN_MATCH_GAP_MIN from the config).
 #   --fresh         Do not carry over the selections already in the file.

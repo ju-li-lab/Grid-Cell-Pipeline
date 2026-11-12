@@ -1,26 +1,11 @@
 function C = spm_options()
 % SPM_OPTIONS  Every MATLAB-side setting for the Grid Cell Pipeline.
 %
-% Paths, cluster resources and which subjects to process live in config.sh.
-% Everything that ends up inside an SPM batch lives here.
-%
-% HOW THIS FILE WORKS
-% -------------------
-% The structs below are handed to SPM wholesale, e.g.
-%
-%     matlabbatch{1}.spm.spatial.realignunwarp.eoptions = C.realignunwarp.eoptions;
-%
-% so ANY option SPM accepts can be set by adding a field here. Nothing else
-% needs changing - no parser, no mapping table, no validator to update.
-% Field names are SPM's own; look them up in the SPM batch editor or in
-% spm_cfg_realignunwarp.m / spm_cfg_fieldmap.m.
-%
-% Values are MATLAB literals, so [] is an empty number, '' is an empty
-% string, and [12 12] is a vector. There is no guessing.
-%
-% One exception: the output filename prefixes (u, s, r) are NOT here. The
-% shell scripts need them too, so config.sh owns them and the batch
-% builders fill them in.
+% Paths and modes live in config.sh; everything that ends up inside an SPM
+% batch lives here. The structs are handed to SPM wholesale, so ANY option
+% SPM accepts can be set by adding a field — no parser or mapping table.
+% Field names are SPM's own. The output filename prefixes (u, s, r) are in
+% config.sh because the shell scripts need them too.
 
 C = struct();
 
@@ -40,11 +25,7 @@ TE_LONG_MS  = 7.38;
 
 % Total EPI readout, MILLISECONDS. Used by the SPM FieldMap toolbox (tert).
 % func/*_bold.json -> TotalReadoutTime (seconds, so multiply by 1000).
-%
-% Readout time scales the distortion correction
-% linearly, so one of the two is wrong by that factor. TotalReadoutTime and
-% EstimatedTotalReadoutTime are different BIDS fields and may legitimately
-% differ, but not usually by this much.
+% Readout time scales the distortion correction linearly.
 TOTAL_READOUT_MS = 33.2499;
 
 % Blip direction for SPM FieldMap, +1 or -1. Depends on the phase-encode
@@ -75,8 +56,7 @@ C.realignunwarp.uweoptions = struct( ...
     'basfcn',   [12 12], ...
     'regorder', 1, ...
     'lambda',   100000, ...
-    'jm',       0, ...          % Jacobian deformations: 0 = No, 1 = Yes.
-    ...                         % Was 3, which is not a value SPM accepts.
+    'jm',       0, ...          % Jacobian deformations: 0 = No, 1 = Yes
     'fot',      [4 5], ...      % first-order effects: pitch and roll
     'sot',      [], ...         % second-order effects; [] = none
     'uwfwhm',   2, ...
@@ -133,12 +113,10 @@ C.fieldmap.defaultsval = struct( ...
         'pad',    0, ...
         'ws',     1), ...
     ...
-    ... % Brain mask SPM builds to unwrap the phase against. When GRE
-    ... % unwarping looks wrong, this is the first thing to try: loosen
-    ... % thresh, or change nerode/ndilate, and look at the resulting mask.
+    ... % Brain mask SPM unwraps the phase against. If GRE unwarping looks
+    ... % wrong, loosen thresh or change nerode/ndilate first.
     'mflags', struct( ...
         'template', {{''}}, ...   % empty = SPM's own toolbox/FieldMap/T1.nii
-        ...                      % (resolved by the VDM builder, once SPM is on the path)
         'fwhm',     5, ...
         'nerode',   2, ...
         'ndilate',  4, ...
@@ -192,25 +170,10 @@ C.coreg.eoptions = struct( ...
                  0.01 0.01 0.01 0.001 0.001 0.001], ...
     'fwhm',     [7 7]);
 
-%  interp here applies to the ROI MASKS only:
-%     0  nearest neighbour - one input sample per output voxel
-%    -1  label (SPM25+)    - interpolates each label's indicator and takes
-%                            the argmax, i.e. a local majority vote
-%
-%  KEEP THIS AT 0. Nearest neighbour is already very nearly volume-faithful
-%  here: measured over all 36 masks in spm-preproc-oap, the true ROI volume
-%  comes to 435 output voxels and NN produced 459 (+5%). A majority vote
-%  comes to about 268 (-42%), because entorhinal cortex is a thin ribbon and
-%  a voxel needs more than half its volume inside the ROI to survive the
-%  vote. -1 was tried and gave smaller masks and fewer valid voxels.
-%
-%  The output grid is 2 x 2 x 3.45 mm (13.8 mm3), NOT 2 mm isotropic - 30
-%  slices over 103.5 mm. That slice thickness, not the interpolation, is why
-%  a ~150 mm3 ROI lands on only ~11 voxels.
-%
-%  The T2w is NOT resliced with this. coreg_reslice_rois.m writes it with
-%  splines in a second call, because a T2w has a couple of thousand distinct
-%  intensities and SPM's label path rejects it ("Too many label values").
+%  interp applies to the ROI MASKS only: 0 = nearest neighbour, -1 = label
+%  interpolation (SPM25+, a local majority vote). NN is nearly volume-
+%  faithful on this thin ribbon (+5%); the majority vote shrinks it (-42%).
+%  The T2w is resliced separately with splines (coreg_reslice_rois.m).
 C.coreg.roptions = struct( ...
     'interp', -1, ...
     'wrap',   [0 0 0], ...
@@ -220,17 +183,9 @@ C.coreg.roptions = struct( ...
 %% ========================================================================
 %  6b. SLICE TIMING  (spm.temporal.st)
 %  ========================================================================
-%  Where in the TR everything is shifted to, as a fraction: 0.5 is the
-%  middle, 0 the first slice acquired.
-%
-%  This is tied to the GLM below. SPM samples the design matrix at
-%  microtimeOnset of microtimeResolution bins, so after correcting to
-%  fraction f you want microtimeOnset = f * microtimeResolution. At 0.5 and
-%  16 bins that is 8, which is what section 9 has. The slicetime stage
-%  checks the pair and warns if you change one without the other.
-%
-%  The slice TIMES themselves are not set here: they are read from each
-%  run's JSON sidecar, so no slice order has to be assumed.
+%  Where in the TR everything is shifted to (0.5 = middle). Tied to the GLM:
+%  microtimeOnset should be ref_fraction * microtimeResolution (the stage
+%  warns if the pair disagrees). Slice TIMES are read from the JSON sidecars.
 C.slicetime.ref_fraction = 0.5;
 
 
@@ -238,9 +193,7 @@ C.slicetime.ref_fraction = 0.5;
 %  7. SMOOTHING  (spm.spatial.smooth)
 %  ========================================================================
 
-% The kernel width and the prefix come from config.sh (SMOOTH_FWHM,
-% SMOOTH_PREFIX), because the shell scripts need to know whether smoothing
-% ran in order to find the right files afterwards.
+% Kernel width and prefix come from config.sh (SMOOTH_FWHM, SMOOTH_PREFIX).
 C.smooth.dtype = 0;             % 0 = same datatype as input
 C.smooth.im    = 0;             % no implicit masking
 

@@ -35,21 +35,8 @@ function prepare_gridcat_directory(PREPROC_ROOT, OUTPUT_ROOT, varargin)
 %       ├── run_manifest.tsv         (which run of each task was used)
 %       └── _logs/                   (processing log)
 %
-% RUN ENTITIES ARE DROPPED HERE, ON PURPOSE
-% -----------------------------------------
-% A session can hold several runs of a task, but exactly one of them was
-% preprocessed. Inside GLM_runauto every file is therefore renamed to the
-% plain <sub>_<ses>_task-<label> form, without the run entity. That is what
-% makes the event tables line up: they frequently carry no run in their names,
-% and matching a run-less event file against u..._task-run1_run-2_bold_0001.nii
-% either fails or, worse, matches the wrong run.
-%
-% Nothing is lost — run_manifest.tsv records which run each flattened file came
-% from, and the derivatives keep their full BIDS names.
-%
-% Example:
-%   prepare_gridcat_directory('/sc-projects/.../derivatives/spm-preproc', ...
-%       '/sc-projects/.../analysis', 'IncludeTasks', {'task-1','task-2'})
+% Run entities are dropped on the way out, so the run-less event tables line
+% up by name; run_manifest.tsv records which run each flattened file came from.
 
 %% Parse inputs
 p = inputParser;
@@ -59,10 +46,7 @@ addParameter(p, 'IncludeTasks', {}, @iscell);
 addParameter(p, 'ExcludeTasks', {'task-rest', 'task-reverse'}, @iscell);
 addParameter(p, 'FuncPrefix', 'u', @ischar);
 addParameter(p, 'ROIPrefix', 'r', @ischar);
-% The anatomical label in the ROI filenames (ROI_LABEL in config.sh). Used
-% to pick the masks apart from anything else in anat/; was hardcoded 'ErC',
-% which silently found nothing for any other structure.
-addParameter(p, 'ROILabel', 'ErC', @ischar);
+addParameter(p, 'ROILabel', 'ErC', @ischar);   % ROI_LABEL in config.sh
 addParameter(p, 'RPPrefix', 'rp', @ischar);
 addParameter(p, 'CopyMode', 'copy', @(x) ismember(x, {'copy', 'symlink'}));
 addParameter(p, 'DryRun', false, @islogical);
@@ -314,14 +298,7 @@ end
 function results = process_one_session(item, FUNC_DIR, RP_DIR, ROI_DIR, ...
     funcPrefix, funcSuffix, rpPrefix, roiPrefix, roiLabel, copyMode, verbose, dryRun)
 % PROCESS_ONE_SESSION  Flatten a single subject-session (parfor-safe).
-%
 % Returns a struct array with one entry per task (+ ROI info on last entry).
-%
-% Everything is renamed on the way out: the derivatives keep the full BIDS
-% name of the run that was preprocessed (u<sub>_<ses>_task-run1_run-2_bold.nii),
-% and GLM_runauto gets the run-free form (u<sub>_<ses>_task-run1_bold.nii).
-% Only one run per task was preprocessed, so nothing becomes ambiguous, and the
-% event tables — which often carry no run entity — line up by name.
 
     sub  = item.sub;
     ses  = item.ses;

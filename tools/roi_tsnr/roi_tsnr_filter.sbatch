@@ -43,15 +43,9 @@ fi
 : "${OUT_DIR:?not set - submit through run_roi_tsnr_filter.sh}"
 : "${WORK_LIST:?not set - submit through run_roi_tsnr_filter.sh}"
 
-# Defaults here, not inline: a ${VAR:-{'x'}} default holding braces is
-# mis-parsed by the shell, and the MATLAB cell syntax is all braces.
-#
-# NAMES MUST NOT COLLIDE WITH config.sh. This script inherits the launcher's
+# NAMES MUST NOT COLLIDE WITH config.sh: this script inherits the launcher's
 # exports and THEN sources config.sh, so a shared name is silently overwritten
-# by the config value. RTF_TASKS is prefixed for exactly that reason: config.sh
-# defines TASKS=1,2,3, which arrives here as "1,2,3" and is not MATLAB syntax.
-: "${KEEP_PCT:=[50 50]}"
-: "${MIN_TSNR:=[]}"
+# (hence RTF_TASKS, not TASKS).
 : "${FUNC_PREFIX:=u}"
 : "${RTF_TASKS:=[1 2 3]}"
 : "${COMBINE:=mean}"
@@ -74,7 +68,6 @@ mkdir -p "$PARTS"
 echo "task ${TASK_ID}: ${SUB} ${SES}"
 echo "  functionals : ${DERIV_ROOT_IN} (${FUNC_PREFIX}sub-*)"
 echo "  ROI masks   : ${ROI_DIR}"
-echo "  keep        : ${KEEP_PCT}   min tSNR: ${MIN_TSNR}"
 echo "  out         : ${OUT_DIR}"
 
 matlab -nodisplay -nosplash -singleCompThread -batch "\
@@ -85,8 +78,6 @@ matlab -nodisplay -nosplash -singleCompThread -batch "\
             'OutDir',    '${OUT_DIR}', \
             'Subjects',  {'${SUB}'}, \
             'Sessions',  {'${SES}'}, \
-            'KeepPct',   ${KEEP_PCT}, \
-            'MinTSNR',   ${MIN_TSNR}, \
             'Prefix',    '${FUNC_PREFIX}', \
             'Tasks',     ${RTF_TASKS}, \
             'Combine',   '${COMBINE}', \

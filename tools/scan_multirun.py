@@ -413,9 +413,7 @@ def write_tsv(path, rows):
 def summarise(rows, counts, split_sessions, unmatched, args):
     if not rows:
         print('No multi-run cases found. Every session has a single run of each scan.')
-        print('')
-        print('No run_selection.tsv is needed — remove RUN_SELECTION_FILE from the')
-        print('config, or leave it pointing at a file that does not exist.')
+        print('No run_selection.tsv is needed.')
         return
 
     print('Multi-run cases found:')

@@ -2,124 +2,34 @@ function grid_clusters(glmRoot, varargin)
 %GRID_CLUSTERS  Clusters of voxels that agree with their neighbours on grid
 %               orientation. No new GLM, no Rayleigh sphere, no radius.
 %
-%   grid_clusters(glmRoot)
 %   grid_clusters(glmRoot, 'Subjects', {'sub-01s17'}, 'MaskDir', '/path/ROI')
 %
-% WHY THIS AND NOT A RAYLEIGH MAP
-% -------------------------------
-% A local Rayleigh z needs a sphere radius, and the answer moves when the
-% radius moves. This asks a question with no free spatial parameter: join two
-% face-adjacent voxels if their grid orientations agree to within AngleTol,
-% then look at the connected components. You get objects with sizes, and a
-% size can be tested against a null.
+% Joins two face-adjacent voxels when their orientations agree within
+% AngleTol (computed on unit vectors, so the circular wrap is built in) and
+% looks at the connected components. Writes, per subject x session, into
+% <glmRoot>/grid_clusters/: nbr-dev (open this first: deviation from the
+% face neighbours in orientation degrees, 15 = chance), clust-label,
+% clust-size and clust-ori, plus grid_clusters.csv (one row per cluster) and
+% grid_clusters_summary.csv (one row per subject x session).
 %
-% 1 deg AND 59 deg ARE 2 deg APART at 6-fold symmetry, and this never does
-% modular arithmetic to get that right. Each voxel becomes a unit vector
-%   u = (cos(x*ori), sin(x*ori))
-% and two voxels agree when dot(u_i, u_j) >= cos(x*AngleTol). The wrap is
-% built into the dot product; there is no branch to get wrong.
+% The null shuffles the orientation values among the same voxels Perms times:
+% max_null_p95 is the chance level for cluster extent, dev_p for field
+% smoothness. A pass means spatial structure, not grid coding - and on
+% smoothed functionals it is guaranteed and meaningless.
 %
-% ONE SUBJECT PER CALL IS THE UNIT OF PARALLELISM - see run_grid_clusters.sh.
+% KEEP AngleTol WELL BELOW ~7 DEG (default 5). Two random orientations agree
+% within AngleTol/30 at 6-fold; past bond-percolation threshold (p = 0.2488,
+% i.e. AngleTol ~ 7.5) one noise cluster spans the whole volume and extent
+% stops being a statistic. frac_largest and max_clust_R tell percolation
+% (huge, R near 0) from signal (small, R near 1).
 %
-% WHAT IT WRITES, per subject x session, into <glmRoot>/grid_clusters/
-% -------------------------------------------------------------------
-%   nbr-dev     THE ONE TO OPEN FIRST. Per voxel, how far its orientation
-%               sits from its face neighbours' , in ORIENTATION DEGREES,
-%               0-30. Read it directly: 0 = identical to its neighbours,
-%               15 = exactly chance, 30 = maximally opposed (the sign-flip
-%               line is at 15). Needs no threshold and no cluster to read.
-%   clust-label Integer cluster id, 0 outside. Ids run largest first.
-%   clust-size  Every voxel carries its own cluster's size in voxels, so you
-%               can threshold at the null's 95th percentile in any viewer and
-%               see only clusters bigger than chance.
-%   clust-ori   Every voxel carries its cluster's mean orientation, degrees
-%               in [0, 360/x). Constant inside a cluster, so clusters read as
-%               flat patches of colour and you can see whether neighbouring
-%               clusters hold different orientations or the same one.
+% Options: 'Subjects' ({} = all; one per call, see run_grid_maps.sh),
+% 'Sessions' (default {'ses-01'}), 'MaskDir' (empty = skip the ROI overlap
+% columns), 'Run' (0 = across-run mean vector, 1/2/3 = that run alone),
+% 'AngleTol' (5), 'MinSize' (10), 'Perms' (500; 0 skips the null), 'Event'
+% ('translate'), 'XFold' (6), 'Seed' (0), 'OutDir', 'Trial', 'CSV'.
 %
-% and two CSVs: one row per cluster in grid_clusters.csv, one row per
-% subject x session in grid_clusters_summary.csv.
-%
-% THE NULL
-% --------
-% Cluster extent means nothing on its own, so the orientation values are
-% shuffled among the same voxels Perms times and the clustering redone. The
-% spatial support and the value distribution are held fixed; only the
-% arrangement changes. Two numbers come out:
-%
-%   max_null_p95   the 95th percentile of the largest cluster under shuffling.
-%                  A cluster bigger than this is bigger than chance.
-%   dev_p          one-sided p for the whole field being smoother than
-%                  chance, from the mean neighbour agreement.
-%
-% WHAT A PASS DOES AND DOES NOT MEAN. It means the orientation field is
-% spatially structured. It does NOT mean grid coding: any source of spatial
-% autocorrelation produces it.
-%
-%   - ON SMOOTHED FUNCTIONALS THIS TEST IS GUARANTEED TO PASS AND IS
-%     MEANINGLESS. A kernel makes neighbours share signal by construction.
-%     Run it on an unsmoothed trial.
-%   - Even unsmoothed, EPI carries autocorrelation from reconstruction and
-%     from realignment interpolation, so a small effect is expected.
-%   - Whether aligned beats misaligned is still GLM2's question, not this
-%     one. This says WHERE TO LOOK.
-%
-% WHY AngleTol DEFAULTS TO 5 AND NOT 15
-% -------------------------------------
-% Two random orientations agree within AngleTol with probability
-% AngleTol/(180/x) - at 6-fold, AngleTol/30. Each voxel has 6 face
-% neighbours, so the shuffled graph has mean degree 6*AngleTol/30.
-%
-% Bond percolation on a simple cubic lattice has a threshold at p = 0.2488.
-% Above it a single connected component spans the whole volume IN PURE
-% NOISE. At AngleTol = 15 (the sign-flip line, the tempting choice) p = 0.5,
-% and both the data and the null give one giant cluster the size of the
-% brain: max cluster extent stops being a statistic. At the default 5,
-% p = 0.167 and the null stays in small pieces, so a real patch stands out.
-%
-% The tool prints p and warns past 0.22, and warns again if the largest
-% cluster actually holds more than a quarter of the valid voxels. Two columns
-% tell percolation from signal: frac_largest, the share of valid voxels in the
-% biggest cluster, and max_clust_R, its internal resultant length. A real
-% patch is small and has max_clust_R near 1; a percolating chain is enormous
-% and has max_clust_R near 0, because it wanders through orientation space one
-% tolerable step at a time. dev_deg and dev_p are immune to all of this and
-% stay readable at any tolerance, which is the other reason to read nbr-dev
-% first.
-%
-% It is run whole-brain on purpose. If the field clusters in visual cortex
-% and not in the ErC, the method works and the ErC is just noisy; if it
-% clusters nowhere, something upstream is wrong. Both are worth knowing, and
-% neither is visible from inside an ROI.
-%
-% OPTIONS
-%   'Subjects'  {} = all. One per call for parallelism.
-%   'Sessions'  default {'ses-01'}. Sessions 2 and 3 are post-intervention.
-%   'MaskDir'   ROI masks, as r<sub>_<ses>_hemi-*_mask.nii. Empty = skip the
-%               ROI overlap columns. Clustering is whole-brain either way.
-%   'Run'       0 (default) = the across-run mean vector. 1/2/3 = that run
-%               alone, for asking whether the same clusters come back.
-%   'AngleTol'  agreement tolerance in ORIENTATION degrees, default 5.
-%               Must be in (0, 180/XFold) - at 6-fold that is (0, 30), and 30
-%               would join everything to everything.
-%               DO NOT RAISE THIS ABOVE ~7 WITHOUT READING THE NOTE ON
-%               PERCOLATION BELOW. The default is not a round number by
-%               accident.
-%   'MinSize'   smallest cluster written to the CSV, default 10 voxels. The
-%               images keep every cluster.
-%   'Perms'     shuffles for the null, default 500. 0 skips the null, and
-%               then the size images have nothing to be read against.
-%   'Event'     grid event name, default 'translate'
-%   'XFold'     default 6
-%   'Seed'      RNG seed for the null, default 0, so a rerun reproduces.
-%   'OutDir'    default <glmRoot>/grid_clusters
-%   'Trial'     label written into both CSVs so trials stack up
-%   'CSV'       default <OutDir>/grid_clusters.csv
-%
-% Reads only what GLM1 wrote, by image name, so keepUnusedGridEvents and any
-% other change to the beta NUMBERING is irrelevant here.
-%
-% THIS WHOLE DIRECTORY IS OPTIONAL. Nothing in the pipeline calls it.
+% Nothing in the pipeline calls this; deleting the folder breaks nothing.
 
 p = inputParser;
 p.addParameter('Subjects', {});

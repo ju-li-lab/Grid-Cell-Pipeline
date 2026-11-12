@@ -13,29 +13,18 @@ function vdm_out = make_vdm(data, epiRef, funcDir, fmapDir, CFG, taskLabel)
 %       A ready-made fieldmap, already in Hz. SPM only converts it to a
 %       VDM. This is PREPROC_MODE=precalc_fieldmap.
 %
-% Everything else is identical between the two, which is why they are one
-% function: the GRE and precalculated routes were previously two
-% near-verbatim copies, so any fieldmap fix had to be made twice and the
-% hardcoded mflags existed in two places.
-%
-% The result is moved to funcDir under a deterministic name,
-% vdm_task-<label>.nii, because vdmflags.prefix cannot be relied on -
-% SPM's FieldMap toolbox sometimes ignores or overrides it. So instead of
-% trusting the name, this snapshots the vdm* files before the run and diffs
-% afterwards to find what SPM actually wrote.
+% The result is moved to funcDir as vdm_task-<label>.nii. vdmflags.prefix
+% cannot be relied on, so the vdm* files are snapshotted before the run and
+% diffed afterwards to find what SPM actually wrote.
 
 % ---- Snapshot existing VDM candidates (before) ----
 vdmSearchDirs = {funcDir, fmapDir, pwd};
 before = list_vdm_candidates(vdmSearchDirs);
 
-% ---- And the unwarped sample this is about to write over ----
-% matchvdm=1 makes the FieldMap toolbox write one unwarped sample volume,
-% named u<the EPI it matched against>. Nothing in this pipeline reads it, and
-% that is exactly the name Realign & Unwarp gives its own output whenever
-% slice timing has not renamed its input first (SLICETIME_ORDER=after, or
-% DO_SLICE_TIMING=0). So the sample is removed below rather than left to
-% collide - and if a finished 4D series was sitting under that name, this run
-% has just destroyed it and says so.
+% matchvdm=1 writes an unwarped sample named u<EPI> - the same name Realign &
+% Unwarp gives its own output when slice timing has not renamed its input.
+% The sample is removed below rather than left to collide; if a finished 4D
+% series sat under that name, this run just destroyed it and says so.
 samplePath   = unwarped_sample_path(epiRef);
 sampleWas4D  = false;
 if isfile(samplePath)

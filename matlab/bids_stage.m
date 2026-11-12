@@ -4,33 +4,14 @@ function out = bids_stage(srcFile, destDir, newName)
 %   out = bids_stage(srcFile, destDir)
 %   out = bids_stage(srcFile, destDir, 'sub-01_ses-01_task-run1_bold.nii')
 %
-%   - .nii.gz is decompressed on the way in, so the raw BIDS directory never
-%     gains an uncompressed twin (which is what ensure_nii used to do).
-%   - The JSON sidecar comes along, so the validation and provenance steps can
-%     read the acquisition parameters from the derivative alone.
-%   - The .nii is ALWAYS re-copied, never reused. See below.
+%   - .nii.gz is decompressed on the way in; the JSON sidecar comes along.
+%   - The .nii is ALWAYS re-copied, never reused: SPM writes estimated
+%     transforms into the input image headers, so mtime cannot say whether a
+%     staged file is still a faithful copy (a diverged coregistration once
+%     poisoned every later run this way). The sidecar is skipped when
+%     current, because nothing writes to it.
 %
 %   Returns the path of the staged .nii.
-%
-%   Copying is not an optimisation the pipeline can skip: SPM's Realign &
-%   Unwarp and Coregister write the estimated transforms into the *input*
-%   image headers. A symlink would write straight through to the raw BIDS file.
-%
-%   That same fact is why a staged .nii is never reused. This function used to
-%   skip the copy when the staged file was no older than its source, which
-%   looks safe and is not: SPM rewriting the header updates the staged file's
-%   modification time, so from the first run onwards it is permanently newer
-%   than the raw file and the check says "up to date" forever. Whatever
-%   transform SPM last wrote then becomes the starting point of the next run.
-%
-%   One session failed exactly this way. A coregistration diverged and put the
-%   T2w 145 mm from the EPI; every later run reused that header, so the
-%   coregistration could never recover and the ROI masks resliced to zero
-%   voxels no matter what else was changed. The mtime of a file SPM has
-%   written to cannot tell you whether it is still a faithful copy.
-%
-%   The JSON sidecar is a different matter and is still skipped when current:
-%   nothing in the pipeline writes to it, so its timestamp means what it says.
 %
 %   See also BIDS_DERIV, BIDS_RESET_DERIV.
 

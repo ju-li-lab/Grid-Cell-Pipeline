@@ -1,111 +1,22 @@
 function run_spm_preproc(BIDS_ROOT, SUB, SES, cfgFile, stages)
 % run_spm_preproc(BIDS_ROOT, SUB, SES, cfgFile, stages)
 %
-% Example:
-%   run_spm_preproc('/sc-projects/.../b2_bids','sub-01s06','ses-01')
-%   run_spm_preproc('/sc-projects/.../b2_bids','sub-01s06','ses-01', '/path/to/config.sh')
-%   run_spm_preproc('/sc-projects/.../b2_bids','sub-01s06','ses-01', '', 'realign,coreg,smooth')
+% SPM preprocessing for one subject/session: stage inputs into the
+% derivatives, build VDMs, slice-time, realign (& unwarp), coregister the
+% T2w and reslice the ROIs, smooth. Nothing is ever written into BIDS_ROOT.
 %
-% For one subject/session:
-% - Picks one run of each input (BOLD per task, T2w, fieldmap, reverse-PE EPI)
-%     and copies it into the derivatives directory
-% - Finds fmap magnitude1 + phasediff, or the reverse phase-encode EPI
-% - For each task, builds a voxel displacement map matched to that run's geometry
-% - Optionally shifts every slice to a common point in the TR, before or
-%     after realignment as SLICETIME_ORDER says
-% - Runs Realign & Unwarp for the whole session with one data block per task
-%     (or Realign only, depending on PREPROC_MODE in config)
-% - Creates a session mean by averaging the per-task means
-% - Coregisters T2w -> session mean and reslices ROI left/right into EPI space
-% - Optionally smooths the preprocessed BOLD files
+% stages: comma-separated list of topup, vdm, slicetime, realign, coreg,
+% smooth, or the shorthands all / fieldmap / post_fieldmap. Stages always run
+% in canonical order, with slicetime on the side of realign that
+% SLICETIME_ORDER names. Each stage reads what it needs from disk, so any
+% subset can be re-run later (see DERIV_RESET for when derivatives clear).
 %
-% WHERE THE OUTPUT GOES
-% ---------------------
-% Nothing is ever written into BIDS_ROOT. Every input SPM touches is copied
-% into a BIDS-style derivatives tree first:
+% When a session holds several runs of a scan, one is chosen per input:
+% run_selection.tsv first, then the run closest in acquisition time, else
+% STRICT_RUN_MATCHING decides. The choice is recorded in
+% <ses>/preproc_run_selection.tsv, which the GridCAT preparation reads.
 %
-%   <DERIV_ROOT>/spm-preproc/<sub>/<ses>/func/   u*_bold.nii, rp_*.txt, vdm_*,
-%                                                topup_*, meanu_session.nii, su*
-%                                     /anat/     the T2w and the resliced ROIs
-%                                     /fmap/     the fieldmap inputs
-%
-% This matters beyond tidiness: SPM's Realign & Unwarp and Coregister write the
-% transforms they estimate into the *headers of their input images*, and
-% ensure_nii used to leave decompressed twins of every .nii.gz behind. Reading
-% raw BIDS and writing derivatives keeps the source data untouched.
-%
-% A full run (a stage list that starts the preprocessing from its beginning)
-% clears the session's derivatives first, so the result is never a mixture of
-% this run and the last one. Partial runs keep them — that is what they resume
-% from. See DERIV_RESET in config.sh.
-%
-% MULTIPLE RUNS OF THE SAME SCAN
-% ------------------------------
-% When a session holds several runs of a scan, one is chosen per input, in this
-% order of preference:
-%
-%   1. The choice in run_selection.tsv (RUN_SELECTION_FILE). Write it with
-%      bash scan_multirun.sh, which lists every run with its acquisition time.
-%   2. The run acquired closest in time to the BOLD being preprocessed, when
-%      the JSON sidecars carry AcquisitionTime. Run numbers are counted per
-%      modality, so run-2 of the T2w need not belong with run-2 of a task —
-%      if the subject climbed out of the scanner in between, they do not.
-%      Acquisition time is what actually says which scans belong together.
-%   3. Nothing else is safe. With STRICT_RUN_MATCHING=true the run stops and
-%      asks for a selection; otherwise it takes the highest run number and
-%      says loudly that it guessed.
-%
-% The chosen runs are recorded in <ses>/preproc_run_selection.tsv, which the
-% GridCAT preparation reads so the event files line up with the right run.
-%
-% STAGES (5th argument, or PREPROC_STAGES in config.sh)
-% ---------------------------------------------------------------
-% The work above is split into six stages that can be run independently. Every
-% stage reads what it needs from disk, so you can stop after any stage, inspect
-% or replace the intermediate files, and resume later.
-%
-%   topup    Estimate the distortion field with FSL topup. Writes
-%            <func>/topup_results_* and <func>/topup_acqparams.txt.
-%            Does nothing unless PREPROC_MODE=topup.
-%   vdm      Build one voxel displacement map per task: <func>/vdm_task-<N>.nii.
-%            Built from the GRE fieldmap (PREPROC_MODE=realign_unwarp) or from
-%            the topup field (PREPROC_MODE=topup, TOPUP_APPLY_METHOD=vdm).
-%            Does nothing for realign_only or for topup+applytopup.
-%   slicetime Shift every slice to the same point in the TR. Does nothing
-%            unless DO_SLICE_TIMING=1. SLICETIME_ORDER puts it either before
-%            realignment (raw -> a*_bold.nii, which realignment then reslices
-%            into ua*_bold.nii) or after it (u*_bold.nii -> au*_bold.nii).
-%            Nothing else has to change: the prefix every later stage reads
-%            is derived from the pair, here and in func_prefix() in
-%            bids_common.sh.
-%   realign  Apply the correction and do motion correction: Realign & Unwarp,
-%            or applytopup followed by Realign, or Realign alone. Writes
-%            u*_bold.nii, rp_*.txt, the per-task means and meanu_session.nii.
-%   coreg    Coregister T2w -> session mean and reslice the ROI masks into EPI
-%            space (r*_mask.nii). Does nothing when DO_COREG_ROIS=0.
-%            Set COREG_VIA_TASK to route this through a whole-brain EPI when
-%            the T2w and the task EPI are both partial slabs; the masks are
-%            still resampled only once. Fails rather than writing a mask with
-%            fewer than COREG_MIN_ROI_VOXELS voxels.
-%   smooth   Gaussian smoothing of the preprocessed BOLD files (su*_bold.nii).
-%            Does nothing when SMOOTH_FWHM=0.
-%
-% Accepted values: a comma-separated list of stage names, or one of the
-% shorthands 'all' (default), 'fieldmap' (= topup,vdm) and 'post_fieldmap'
-% (= everything after the fieldmap stages). Order does not matter — stages
-% always run in the canonical order listed above, with slicetime on the side
-% of realign that SLICETIME_ORDER names.
-%
-% RESUMING FROM FIELDMAPS YOU MADE YOURSELF
-% -----------------------------------------
-% Put your FSL topup output on the cluster and point TOPUP_EXISTING_PREFIX at it
-% (or copy it into <func>/ as topup_results_*), then run the stages
-% 'vdm,realign,coreg,smooth'. Alternatively drop ready-made voxel displacement
-% maps in as <func>/vdm_task-<N>.nii and run 'realign,coreg,smooth'.
-%
-% Settings come from config.sh (paths, modes) and spm_options.m (SPM parameters).
-
-% --------- Handle optional arguments ----------
+% Settings: config.sh (paths, modes) and spm_options.m (SPM parameters).
 if nargin < 4, cfgFile = ''; end
 if nargin < 5, stages  = ''; end
 
@@ -122,13 +33,6 @@ assert(isfile(cfgFile), 'config.sh not found at: %s\nProvide cfgFile as 4th argu
 % run reads the snapshot's settings, not whatever the live checkout has.
 addpath(fileparts(cfgFile), '-begin');
 
-% --------- Read configuration ----------
-% Two files, each read by the language that uses it:
-%   config.sh       paths, modes and filename patterns, as plain strings
-%   spm_options.m   everything that goes into an SPM batch, as MATLAB values
-%
-% There is no mapping table. Anything SPM accepts can be added to
-% spm_options.m and it reaches the batch without a line of code here.
 cfgRaw = read_config(cfgFile);
 OPT    = spm_options();
 
@@ -140,15 +44,13 @@ CFG.SPM_DIR           = cfgRaw.SPM_DIR;
 CFG.PREPROC_MODE      = cfgRaw.PREPROC_MODE;
 CFG.TASK_LABELS       = strtrim(strsplit(cfgRaw.TASKS, ','));
 CFG.DO_COREG_ROIS     = str2double(cfg_or(cfgRaw, 'DO_COREG_ROIS', '1'));
-% Empty = coregister the T2w straight to the session mean. A task label
-% (usually 'rest') routes it through that whole-brain EPI instead.
 CFG.COREG_VIA_TASK    = strtrim(cfg_or(cfgRaw, 'COREG_VIA_TASK', ''));
 CFG.COREG_MIN_ROI_VOXELS = str2double(cfg_or(cfgRaw, 'COREG_MIN_ROI_VOXELS', '5'));
 CFG.ROI_PATTERN_LEFT  = cfgRaw.ROI_PATTERN_LEFT;
 CFG.ROI_PATTERN_RIGHT = cfgRaw.ROI_PATTERN_RIGHT;
 
-% Which run to take when a session holds several of the same scan.
-CFG.RUN_SELECTION_FILE  = cfg_or(cfgRaw, 'RUN_SELECTION_FILE', '');
+% run_selection.tsv always lives next to config.sh (a snapshot carries a copy).
+CFG.RUN_SELECTION_FILE  = fullfile(fileparts(cfgFile), 'run_selection.tsv');
 CFG.RUN_MATCH_GAP_SEC   = str2double(cfg_or(cfgRaw, 'RUN_MATCH_GAP_MIN', '20')) * 60;
 CFG.STRICT_RUN_MATCHING = cfg_flag(cfgRaw, 'STRICT_RUN_MATCHING', true);
 
@@ -175,22 +77,12 @@ CFG.SMOOTH_PREFIX    = cfg_or(cfgRaw, 'SMOOTH_PREFIX',    's');
 CFG.ROI_PREFIX       = cfg_or(cfgRaw, 'ROI_PREFIX',       'r');
 CFG.SLICETIME_PREFIX = cfg_or(cfgRaw, 'SLICETIME_PREFIX', 'a');
 
-% Slice timing is optional. When it is on, every later stage reads the
-% corrected files, so the flag is checked in more than one place.
 CFG.DO_SLICE_TIMING = cfg_flag(cfgRaw, 'DO_SLICE_TIMING', false);
-
-% Which side of realignment the correction sits on: 'before' or 'after'.
-% It moves the stage in the running order and it changes the filenames, so
-% it is read here and used in three places: the stage order, the two stage
-% blocks, and BOLD_PREFIX just below.
 CFG.SLICETIME_ORDER = lower(strtrim(cfg_or(cfgRaw, 'SLICETIME_ORDER', 'before')));
 assert(ismember(CFG.SLICETIME_ORDER, {'before','after'}), ...
     'Unknown SLICETIME_ORDER: %s (must be before or after)', CFG.SLICETIME_ORDER);
 
-% The prefix the BOLD carries once realignment and slice timing have both
-% run. SPM prepends, so the letters stack in the order the stages ran:
-%   before:  raw -> a -> ua      after:  raw -> u -> au
-% This is what the smoothing stage reads and what FUNC_PREFIX is built on.
+% SPM prepends, so the letters stack in stage order (before: ua, after: au).
 % Same rule as func_prefix() in bids_common.sh - change one, change the other.
 CFG.BOLD_PREFIX = CFG.RESLICE_PREFIX;
 if CFG.DO_SLICE_TIMING
@@ -202,9 +94,7 @@ if CFG.DO_SLICE_TIMING
 end
 CFG.SMOOTH_FWHM    = str2double(cfg_or(cfgRaw, 'SMOOTH_FWHM', '0'));
 
-% ---- from spm_options.m ----
-% Batch options are read straight off CFG.spm where they are used. These
-% few are also needed outside a batch, so they get a short name here.
+% ---- from spm_options.m (the few values needed outside an SPM batch) ----
 CFG.TR                   = OPT.TR;
 CFG.DO_SESSION_MEAN      = OPT.session_mean.enabled;
 CFG.SESSION_MEAN_NAME    = OPT.session_mean.name;
@@ -213,8 +103,7 @@ CFG.TOPUP_PE_DIR_REVERSE = OPT.topup.pe_dir_reverse;
 CFG.TOPUP_READOUT_SEC    = OPT.topup.readout_sec;
 CFG.TOPUP_INTERP         = OPT.topup.interp;
 
-% --------- Resolve which stages to run ----------
-% Explicit argument wins over PREPROC_STAGES in the config file.
+% Explicit stages argument wins over PREPROC_STAGES in the config file.
 if isempty(stages) && isfield(cfgRaw, 'PREPROC_STAGES')
     stages = cfgRaw.PREPROC_STAGES;
 end
@@ -300,16 +189,8 @@ taskBoldFiles = cell(nTasks,1);
 
 needVols = STAGES.vdm || STAGES.slicetime || STAGES.realign;
 
-% Smoothing on its own reads only what the earlier stages left in the
-% derivatives, so there is nothing to choose and nothing to copy.
-%
-% Two different questions, and they have different answers for coreg:
-%   needSelection  do we have to CHOOSE runs? coreg does - the anchor decides
-%                  which T2w, ROI masks and bridge EPI go with these runs.
-%   needBoldFiles  do we have to STAGE the BOLD itself? coreg does not: it
-%                  reads the session mean that realignment already left in the
-%                  derivatives. Staging three decompressed runs it never opens
-%                  is the slowest part of a coreg-only re-run.
+% coreg must CHOOSE runs (the anchor decides which T2w/ROIs belong to them)
+% but does not STAGE the BOLD - it only reads the session mean.
 needSelection = STAGES.topup || STAGES.vdm || STAGES.slicetime || ...
                 STAGES.realign || STAGES.coreg;
 needBoldFiles = STAGES.topup || STAGES.vdm || STAGES.slicetime || STAGES.realign;
@@ -352,7 +233,6 @@ reverseSrc  = '';
 phasediffSrc = '';
 
 if strcmp(CFG.PREPROC_MODE, 'realign_unwarp') && STAGES.vdm
-    % GRE fieldmap mode: need phasediff + the magnitude it pairs with
     [phasediffSrc, magSrc] = select_phasediff(RAW.fmap, SUB, SES, CFG, runSel, anchor);
     phasemap   = bids_stage(phasediffSrc, fmapDir);
     magnitude1 = bids_stage(magSrc,       fmapDir);
@@ -361,8 +241,6 @@ if strcmp(CFG.PREPROC_MODE, 'realign_unwarp') && STAGES.vdm
     fprintf('Fieldmap magnitude1: %s\n', magnitude1);
 
 elseif strcmp(CFG.PREPROC_MODE, 'precalc_fieldmap') && STAGES.vdm
-    % Precalculated fieldmap mode: a ready-made B0 map plus the magnitude image
-    % it was unwrapped against — what make_fieldmaps.sh writes.
     [fieldmapSrc, magSrc] = select_precalc_fieldmap(RAW.fmap, DER.fieldmapSes, SUB, SES, CFG, runSel, anchor);
     fieldmapFile = bids_stage(fieldmapSrc, fmapDir);
     fieldmapMag  = bids_stage(magSrc,      fmapDir);
@@ -371,7 +249,6 @@ elseif strcmp(CFG.PREPROC_MODE, 'precalc_fieldmap') && STAGES.vdm
     fprintf('Fieldmap units:     %s\n', CFG.FIELDMAP_UNITS);
 
 elseif strcmp(CFG.PREPROC_MODE, 'topup') && STAGES.topup
-    % Topup mode: find the reverse-PE EPI acquired with these functional runs.
     reverseSrc = select_reverse_pe(RAW, SUB, SES, CFG, runSel, anchor);
     reversePE_epi = bids_stage(reverseSrc, fmapDir);
     fprintf('Reverse-PE EPI:  %s\n', reversePE_epi);
@@ -410,12 +287,8 @@ if STAGES.coreg && CFG.DO_COREG_ROIS
     fprintf('\n');
 end
 
-% --------- Record what was chosen ----------
-% The GridCAT preparation reads this back, so the event tables end up with the
-% run that was actually preprocessed even when their filenames say nothing
-% about runs. A partial run only decided some of these, so the file is merged
-% rather than replaced — otherwise re-running the coreg stage on its own would
-% erase which BOLD run the realignment used.
+% Record what was chosen. The GridCAT preparation reads this back; the file
+% is merged rather than replaced, so a partial run cannot erase earlier picks.
 if needSelection
     write_run_manifest(DER, SUB, SES, CFG, boldPicks, ...
         struct('T2w', t2wSrc, 'fieldmap', fieldmapSrc, 'phasediff', phasediffSrc, ...
@@ -424,9 +297,7 @@ if needSelection
         anchor);
 end
 
-% --------- Validate config against the BIDS JSON sidecars we chose ----------
-% Reading the sidecars of the selected files (not "any file in the folder")
-% means the check describes the run actually being preprocessed.
+% Validate the config against the sidecars of the files actually chosen.
 if STAGES.topup || STAGES.vdm || STAGES.realign
     check_bids_params(taskBoldFiles, reversePE_epi, phasemap, fieldmapFile, CFG);
 end
@@ -521,13 +392,8 @@ end
 % =====================================================================
 %  STAGE slicetime — shift every slice to the same point in the TR
 % =====================================================================
-%  Optional, and off unless DO_SLICE_TIMING=1 in config.sh. SLICETIME_ORDER
-%  says which side of realignment it sits on, so the stage has two blocks:
-%  this one, and the mirror of it after the realign stage. Exactly one of
-%  them does anything in a given run.
-%
-%  Either way it sits after the fieldmap stages, because the VDM is matched
-%  to an untouched EPI reference.
+%  Two blocks, one on each side of realign; SLICETIME_ORDER decides which
+%  one does anything.
 
 stcBefore = CFG.DO_SLICE_TIMING && strcmp(CFG.SLICETIME_ORDER, 'before');
 stcAfter  = CFG.DO_SLICE_TIMING && strcmp(CFG.SLICETIME_ORDER, 'after');
@@ -536,15 +402,8 @@ if STAGES.slicetime && ~CFG.DO_SLICE_TIMING
     fprintf('\n=== STAGE slicetime: skipped (DO_SLICE_TIMING=0) ===\n');
 end
 
-% --------- order = before: correct the raw series, then realign it ----------
-%  Slice timing resamples in time only, so the geometry the VDM was built
-%  against is unchanged.
-%
-%  Whether or not this run performs the stage, anything downstream has to
-%  read the corrected files if an earlier run wrote them - otherwise
-%  resuming with --stages realign,coreg,smooth would silently go back to
-%  the uncorrected data.
-
+% order = before: correct the raw series, then realign it. Downstream stages
+% must read the corrected files even when this run skipped the stage.
 if stcBefore && STAGES.slicetime
     fprintf('\n=== STAGE slicetime: correcting to %.2f x TR, before realign ===\n', ...
             CFG.spm.slicetime.ref_fraction);
@@ -575,11 +434,8 @@ elseif stcBefore && (STAGES.realign || STAGES.smooth)
     end
 end
 
-% --------- What realignment writes, task by task ----------------------------
-%  Realign and Realign & Unwarp both prepend RESLICE_PREFIX to the name of
-%  the file they were handed, so the output name is known before the stage
-%  runs. That is what lets 'slicetime' run on its own afterwards in the
-%  'after' order, on a session whose realignment finished days ago.
+% What realignment writes, task by task: RESLICE_PREFIX prepended to its
+% input, so the output name is known before the stage runs.
 useApplytopup = strcmp(CFG.PREPROC_MODE, 'topup') && ...
                 strcmp(CFG.TOPUP_APPLY_METHOD, 'applytopup');
 realignInput  = cell(nTasks,1);
@@ -588,9 +444,6 @@ for ii = 1:nTasks
     if isempty(taskBoldFiles{ii}), continue; end
     realignInput{ii} = taskBoldFiles{ii};
     if useApplytopup
-        % applytopup writes a distortion-corrected copy and realign is handed
-        % that. Keep every BIDS entity of the file it came from, so a
-        % multi-run session still says which run was corrected.
         realignInput{ii} = regexprep(realignInput{ii}, '_bold\.nii$', '_bold_dc.nii');
     end
     [d, n, e] = fileparts(realignInput{ii});
@@ -652,14 +505,7 @@ end
 % =====================================================================
 %  STAGE slicetime, the other side — after realignment
 % =====================================================================
-%  The mirror of the block above, for SLICETIME_ORDER=after. Realignment has
-%  resampled the data in space but has not touched the time axis, so the
-%  slice times in the sidecar still describe it and the correction is the
-%  same operation on a different input: it reads u*_bold.nii and writes
-%  au*_bold.nii, which is what smoothing and GridCAT then pick up.
-%
-%  Realignment itself never sees corrected data in this order, which is the
-%  point of the switch: the motion estimate is made on the untouched EPI.
+%  Reads u*_bold.nii, writes au*_bold.nii.
 
 if stcAfter && STAGES.slicetime
     fprintf('\n=== STAGE slicetime: correcting to %.2f x TR, after realign ===\n', ...
@@ -719,18 +565,8 @@ end
 
 function doReset = deriv_reset_wanted(CFG, STAGES)
 % DERIV_RESET_WANTED  Whether to clear this session's derivatives first.
-%
-% NOTE: this rule also exists in bash, in deriv_reset_wanted() inside
-% bids_common.sh. Both are needed and neither is redundant: the bash one
-% runs once before an array is submitted (so sessions dropped from the
-% subject list do not survive), this one runs per session at job start (so
-% calling 01_preprocess.sbatch directly still clears). Change one, change
-% the other.
-% DERIV_RESET_WANTED  Should this run start from an empty derivatives folder?
-%
-% Only a run that redoes the preprocessing from its beginning may clear the
-% previous output. A resumed run (realign,coreg,smooth and friends) reads that
-% output back, so wiping it would delete its own input.
+% Only a from-scratch run may clear; a resume reads the old output back.
+% The same rule exists in bash (bids_common.sh) - change one, change the other.
 
 switch CFG.DERIV_RESET
     case {'never', 'false', 'no', '0'}
@@ -769,20 +605,8 @@ end
 
 
 function save_provenance_log(DER, SUB, SES, CFG, cfgFile, taskBoldFiles, boldPicks, stagesRun)
-% SAVE_PROVENANCE_LOG  Record what this run did, and what it was told to do.
-%
-% Writes three things to the top of the session's derivatives:
-%
-%   config.sh          \  verbatim copies of the settings this run used, so
-%   spm_options.m      /  the record cannot drift from the code
-%   preproc_provenance.json   what ran, on which inputs, with which software
-%
-% Copying the settings files is deliberate. An earlier version listed every
-% parameter by hand, which meant adding a setting took three edits and the
-% log silently went stale whenever someone forgot one.
-%
-% The JSON describes the most recent run. Because stages can be run
-% separately, a running history is also appended to preproc_stages.log.
+% SAVE_PROVENANCE_LOG  Copy config.sh + spm_options.m next to the output and
+% write preproc_provenance.json (latest run) + preproc_stages.log (history).
 
 logFile = fullfile(DER.sesDir, 'preproc_provenance.json');
 fprintf('\nSaving provenance: %s\n', logFile);
@@ -864,22 +688,8 @@ end
 % ===================== STAGE HELPERS =====================
 
 function S = resolve_stages(spec, stcOrder)
-% RESOLVE_STAGES  Turn a stage specification into a struct of flags.
-%
-% spec may be:
-%   ''  or  'all'                     -> every stage
-%   'topup,vdm,slicetime,realign,coreg,smooth' -> an explicit list
-%   {'realign','coreg'}               -> the same as a cell array
-%   'fieldmap'                        -> shorthand for topup,vdm
-%   'post_fieldmap'                   -> everything after the fieldmap stages
-%
-% stcOrder is SLICETIME_ORDER ('before' | 'after'). It decides where
-% slicetime sits in the canonical order, which is the order stages run in
-% whatever order they were listed. Everything else is fixed.
-%
-% Returns a struct with one logical field per stage, plus:
-%   .list     stage names to run, in canonical order
-%   .skipped  stage names that will not run, in canonical order
+% RESOLVE_STAGES  Turn a stage list / shorthand into a struct of flags, plus
+% .list and .skipped in canonical order. stcOrder places slicetime.
 
 if nargin < 2 || isempty(stcOrder), stcOrder = 'before'; end
 

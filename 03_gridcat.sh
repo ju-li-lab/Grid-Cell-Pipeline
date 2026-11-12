@@ -65,18 +65,15 @@ if [[ -z "${SLURM_JOB_ID:-}" ]] && [[ "$RUN_LOCAL" != "true" ]]; then
 
     mkdir -p "${SNAP_DIR}" "${ORIG_SCRIPT_DIR}/logs"
 
+    # The GLM parameters live in spm_options.m and the run selection decided
+    # which data was preprocessed, so both travel with the snapshot.
     cp "$CONFIG_FILE" "${SNAP_DIR}/config.sh"
-    # The GLM parameters live in spm_options.m, so the snapshot is only a
-    # real snapshot if that travels with it.
     cp "${ORIG_SCRIPT_DIR}/spm_options.m" "${SNAP_DIR}/spm_options.m"
     if [[ -f "${ORIG_SCRIPT_DIR}/subses_list.txt" ]]; then
         cp "${ORIG_SCRIPT_DIR}/subses_list.txt" "${SNAP_DIR}/subses_list.txt"
     fi
-    # The run selection decided which run of each scan was preprocessed, so it
-    # belongs with the snapshot: without it the record of this analysis cannot
-    # say which data it ran on.
-    if [[ -n "${RUN_SELECTION_FILE:-}" && -f "${RUN_SELECTION_FILE}" ]]; then
-        cp "${RUN_SELECTION_FILE}" "${SNAP_DIR}/run_selection.tsv"
+    if [[ -f "${ORIG_SCRIPT_DIR}/run_selection.tsv" ]]; then
+        cp "${ORIG_SCRIPT_DIR}/run_selection.tsv" "${SNAP_DIR}/run_selection.tsv"
     fi
 
     {
@@ -87,7 +84,6 @@ if [[ -z "${SLURM_JOB_ID:-}" ]] && [[ "$RUN_LOCAL" != "true" ]]; then
         echo "submitted_at: ${TS}"
         echo "orig_scripts: ${ORIG_SCRIPT_DIR}"
         echo "output_dir:   ${OUTPUT_ROOT}/GLM_output${SAFE_VARIANT:+_${SAFE_VARIANT}}"
-        echo "run_selection: ${RUN_SELECTION_FILE:-<none>}"
     } > "${SNAP_DIR}/submission_info.txt"
 
     echo "============================================"
@@ -105,9 +101,6 @@ if [[ -z "${SLURM_JOB_ID:-}" ]] && [[ "$RUN_LOCAL" != "true" ]]; then
         GRES_FLAG=(--gres="tmp:${GRIDCAT_LOCAL_TMP}")
     fi
 
-    # Optional SLURM dependency (e.g. afterok:1234) so run_all.sh can chain
-    # this after the prep job. Same variable name as stage 02.
-    # this GLM job after the prep job in a single "Run ALL steps" submission.
     if ! command -v sbatch >/dev/null 2>&1; then
         echo "ERROR: sbatch not found — this does not look like a SLURM cluster." >&2
         echo "       To run the analysis here instead:" >&2

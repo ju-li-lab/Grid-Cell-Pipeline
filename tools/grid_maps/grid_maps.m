@@ -1,102 +1,26 @@
 function grid_maps(glmRoot, varargin)
 %GRID_MAPS  Voxel-wise maps from a GridCAT output directory. No new GLM.
 %
-%   grid_maps(glmRoot)
 %   grid_maps(glmRoot, 'Subjects', {'sub-01s17'}, 'MaskDir', '/path/ROI')
-%   grid_maps(glmRoot, 'Subjects', {'sub-01s17'}, 'AnatRoot', '/path/derivatives/spm-preproc')
 %
-% GridCAT's ROI enters GLM2 only as the scalar phi, so every image it writes
-% is whole-brain. This turns those images into maps that say WHERE to look.
-% It reads only what GLM1 already wrote and fits no model.
+% Reads what GLM1 already wrote and writes, per subject x session, into
+% <glmRoot>/grid_maps/: R-runs / R-runs-w / n-runs (across-run orientation
+% agreement), coh-local / z-local / n-local (local between-voxel coherence),
+% sens (1/sqrt(ResMS)), tsnr-glm, F-grid, pct-grid, roi-kept_* and, with
+% AnatRoot and 2+ sessions, R-sessions / n-sessions. See the README for how
+% to read each one.
 %
-% ONE SUBJECT PER CALL IS THE UNIT OF PARALLELISM - see run_grid_maps.sh.
+% Angles are never averaged: everything works on the (beta_cos, beta_sin)
+% components recovered exactly from GridCAT's ori and amplitude images.
+% The null for R is not zero (E[R] ~ 0.71 at n=2, 0.56 at n=3), and z-local
+% is not interpretable on smoothed functionals.
 %
-% WHAT IT WRITES, per subject x session, into <glmRoot>/grid_maps/
-% ----------------------------------------------------------------
-%   R-runs      Does this voxel keep its orientation across runs? The
-%               resultant length of the per-run unit vectors, 0-1. 1 = every
-%               run points the same way in x*alpha space, 0 = they cancel.
-%               NaN where fewer than 2 runs have an estimate.
-%   R-runs-w    The same, amplitude-weighted - equals
-%               nRuns*A_allRunsAvg/sum(A_run). Comparable with GridCAT's own
-%               numbers, but one loud run can carry it, so read R-runs first.
-%   n-runs      How many runs contributed. R from 2 runs is not comparable
-%               with R from 3, so threshold on this before reading R.
-%   coh-local   Local between-voxel coherence: resultant length of the unit
-%               orientation vectors inside a sphere of RadiusMM, computed on
-%               the across-run mean vector. The per-voxel form of the
-%               Rayleigh r in your grid_metrics files.
-%   z-local     n-local * coh-local^2 - Rayleigh's statistic, so ~1 is
-%               chance and >3 is roughly p<0.05 for one neighbourhood.
-%               THIS IS THE "where does Rayleigh z cluster" MAP.
-%   n-local     Valid voxels in each sphere. An edge voxel with n=6 and a
-%               deep one with n=60 are not comparable; this is how you tell.
-%   sens        1/sqrt(ResMS). The GLM's own sensitivity map, and the only
-%               map here that is BLIND TO DIRECTION - so the only one you
-%               may select voxels on without biasing GLM2.
-%   roi-kept_*  One per ROI mask: 0 outside the ROI, 1 ROI voxel the GLM
-%               dropped, 2 ROI voxel with an estimate. Overlay it to see
-%               which part of the ROI the implicit mask deleted and whether
-%               it is a contiguous slab (susceptibility) or scattered
-%               (noise).
+% Options: 'Subjects' ({} = all; one per call for parallelism, see
+% run_grid_maps.sh), 'Sessions', 'MaskDir' (empty = skip roi-kept + CSV),
+% 'AnatRoot' (empty = skip the cross-session map), 'OutDir', 'Event'
+% (default 'translate'), 'XFold' (6), 'RadiusMM' (5), 'Trial', 'CSV'.
 %
-% and per subject, when AnatRoot is given and the subject has 2+ sessions:
-%
-%   R-sessions  Does this voxel keep its orientation ACROSS SESSIONS, in the
-%               first session's grid. The environment is identical across
-%               your sessions, so this is the strongest within-subject test
-%               here - and it does not touch the group design.
-%   n-sessions  Sessions contributing at each voxel.
-%
-% mask.nii IN A GLM DIRECTORY IS NOT AN ROI. It is SPM's implicit analysis
-% mask (value > mthresh * global in every scan of every run). This function
-% never reads it and never treats it as an ROI. ROIs come only from MaskDir,
-% as r<sub>_<ses>_hemi-*_mask.nii, the same convention as the rest of the
-% pipeline. "Dropped" above means the GLM has no estimate there, which is
-% what the implicit mask having excluded the voxel looks like from here.
-%
-% ANGLES ARE NEVER AVERAGED. Everything works on the components
-% (beta_cos, beta_sin), recovered exactly from the two images GridCAT writes:
-%   beta_cos = A*cos(x*ori*pi/180),  beta_sin = A*sin(x*ori*pi/180)
-% because ori = atan2(beta_sin, beta_cos)/x and A = hypot(beta_sin, beta_cos).
-% Verified to reproduce GridCAT's own allRunsAvg images to float32 precision.
-% Summing, filtering and interpolating are all correct on components and all
-% wrong on the degree image.
-%
-% THE NULL FOR R IS NOT ZERO. For n vectors with uniform random phases E[R]
-% is about 0.71 at n=2 and 0.56 at n=3 - the reference level this prints.
-% And because all runs replay the SAME ROUTE, a voxel can score high from
-% route-locked artefact rather than grid coding. Only a permutation null
-% (shuffle direction labels within run, refit GLM1, recompute) separates
-% those, and that is outside this tool.
-%
-% IF THE FUNCTIONALS WERE SMOOTHED, z-local IS NOT INTERPRETABLE. A kernel
-% makes neighbouring voxels share signal by construction, so the map lights
-% up wherever there is any signal at all. Run it on an unsmoothed trial.
-% Running it at both and asking whether the smoothed map is merely a blurred
-% copy is itself the cleanest test of that confound.
-%
-% OPTIONS
-%   'Subjects'  {} = all. One per call for parallelism.
-%   'Sessions'  {} = all
-%   'MaskDir'   ROI masks. Empty = skip roi-kept and the CSV.
-%   'AnatRoot'  preprocessed derivatives tree holding
-%               sub-*/ses-*/anat/sub-*_T2w.nii. Empty (default) = skip the
-%               cross-session map, and then SPM is not needed at all.
-%               MUST be the tree the GLM output was built from: each
-%               session's T2w sits in that session's EPI world space, and
-%               this checks the resliced ROI mask's affine to catch a
-%               mismatched tree.
-%   'OutDir'    default <glmRoot>/grid_maps
-%   'Event'     grid event name, default 'translate'
-%   'XFold'     default 6
-%   'RadiusMM'  sphere radius for coh-local in MILLIMETRES, default 5.
-%               Built from the voxel sizes, so anisotropy is handled - at
-%               2x2x3.45 mm that is +/-2 voxels in x,y and +/-1 in z.
-%   'Trial'     label written into the CSV so trials stack up
-%   'CSV'       default <OutDir>/grid_maps.csv
-%
-% THIS WHOLE DIRECTORY IS OPTIONAL. Nothing in the pipeline calls it.
+% Nothing in the pipeline calls this; deleting the folder breaks nothing.
 
 p = inputParser;
 p.addParameter('Subjects', {});

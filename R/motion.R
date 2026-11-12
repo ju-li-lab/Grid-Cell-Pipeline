@@ -222,9 +222,9 @@ print(motion_between, n = Inf)
 # ============================================================================
 #  4. Plots  —  one line per subject, one panel per session
 # ============================================================================
-#  Same shape as the contrast spaghetti in look_at_data.R, so the two can be
-#  read side by side: if a subject's odd run is motion, its line should spike
-#  in the same place here.
+#  Same shape as the contrast spaghetti in plot_gridcat_run.R, so the two can
+#  be read side by side: if a subject's odd run is motion, its line should
+#  spike in the same place here.
 
 p_within <- ggplot(motion_runs, aes(x = task, y = mean_fd,
                                     colour = subject_id, group = subject_id)) +

@@ -5,50 +5,19 @@ function join_masks(root, labelsA, labelsB, outLabel)
 %   join_masks(someOtherDir)
 %   join_masks(someDir, {'lpmErC','rpmErC'}, 'princeErC', 'pmprinceErC')
 %
-% Walks ROOT recursively, and for every mask it finds of the first label it
-% looks for the matching mask of the second label in the same folder, ORs the
-% two together and writes the result next to them under OUTLABEL.
+% Walks ROOT recursively; for every mask of the first label it finds the
+% matching mask of the second label in the same folder, ORs the two and
+% writes the BINARY union next to them under OUTLABEL. Hemispheres stay
+% separate; only the label in the filename is substituted; outputs are
+% overwritten on a re-run.
 %
-% The output is BINARY: every voxel in either input, and the overlap, comes
-% out as 1. Nothing in it records which of the two regions a voxel came from,
-% so the numbers printed per file are the only record of how much each input
-% contributed - read them, they are the check that the join did what you meant.
+% Label arguments: one name ('princeErC') is used for both hemispheres, two
+% names ({'lpmErC','rpmErC'}) are {left, right}.
 %
-% HEMISPHERES STAY SEPARATE. Left is joined with left, right with right, and
-% the hemi- entity carries through to the output name. Nothing here produces a
-% bilateral mask.
-%
-% LABEL ARGUMENTS
-%   One name  ('princeErC')          used for both hemispheres
-%   Two names ({'lpmErC','rpmErC'})  {left, right} - for labels that carry
-%                                    the hemisphere in the name, as pmErC does
-%
-% The defaults are this project's case: lpmErC/rpmErC joined with princeErC
-% into pmprinceErC.
-%
-% NAMING. Only the label is substituted, so everything else in the filename is
-% kept, the run- entity included:
-%   sub-01s17_ses-01_hemi-left_label-lpmErC_mask.nii
-% + sub-01s17_ses-01_hemi-left_label-princeErC_mask.nii
-% = sub-01s17_ses-01_hemi-left_label-pmprinceErC_mask.nii
-%
-% Outputs are overwritten on a re-run: the join is fully determined by its two
-% inputs, so there is nothing in an old copy worth keeping.
-%
-% A file with no partner is reported and skipped. A partner on a different
-% voxel grid is reported and skipped too, and the function errors at the end
-% so a mismatch cannot pass unnoticed - masks that do not share a grid cannot
-% be joined voxel-wise, and that means something is wrong upstream.
-%
-% Needs only base MATLAB (niftiread/niftiwrite). SPM does not have to be on
-% the path.
-%
-% HEADER. The output carries the first input's grid: same dimensions, same
-% voxel sizes, same sform, so it is already aligned with the T2w the two masks
-% were drawn on and needs no resampling. niftiwrite writes the sform only, so
-% the output has qform_code 0 where the inputs had 2. Nothing is lost - the
-% sform is identical and is what SPM, FSL and nibabel read first - but the
-% field does differ from the masks the Python extraction wrote.
+% A file with no partner, or a partner on a different voxel grid, is reported
+% and skipped, and a grid mismatch errors at the end. Needs only base MATLAB.
+% The output carries the first input's grid (sform only; qform_code comes
+% out 0, which SPM/FSL/nibabel do not mind).
 
 if nargin < 2 || isempty(labelsA),  labelsA  = {'lpmErC', 'rpmErC'}; end
 if nargin < 3 || isempty(labelsB),  labelsB  = 'princeErC';          end
