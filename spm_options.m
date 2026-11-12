@@ -212,7 +212,7 @@ C.coreg.eoptions = struct( ...
 %  splines in a second call, because a T2w has a couple of thousand distinct
 %  intensities and SPM's label path rejects it ("Too many label values").
 C.coreg.roptions = struct( ...
-    'interp', 0, ...
+    'interp', -1, ...
     'wrap',   [0 0 0], ...
     'mask',   0);               % prefix comes from config.sh (ROI_PREFIX)
 
@@ -260,7 +260,7 @@ C.session_mean.name    = 'meanu_session.nii';
 %  ========================================================================
 
 C.GLM.xFoldSymmetry    = 6;     % 6 = hexagonal grid cells, 4 = square
-C.GLM.maskingThreshold = 0.8;   % SPM masking threshold, 0-1. Higher = stricter.
+C.GLM.maskingThreshold = 0;   % SPM masking threshold, 0-1. Higher = stricter.
 C.GLM.microtimeOnset     = 8;
 C.GLM.microtimeResolution = 16;
 C.GLM.derivatives      = [0 0]; % HRF derivatives: [0 0] none,
