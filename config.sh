@@ -126,13 +126,13 @@ DO_COREG_ROIS=1
 # estimate-only, and the single reslice at the end applies the composed
 # transform. Two rigid transforms compose into one rigid transform, so this
 # costs no accuracy over the direct route.
-COREG_VIA_TASK=
+COREG_VIA_TASK=rest
 
 # Fail the job when a resliced ROI mask comes back with fewer than this many
 # voxels. A coregistration that diverges does not raise an error - it writes
 # a mask that misses the brain, and the session then disappears from the
 # analysis with nothing to show why. 0 disables the check.
-COREG_MIN_ROI_VOXELS=5
+COREG_MIN_ROI_VOXELS=3
 
 
 # -----------------------------------------------------------------------------
@@ -338,7 +338,7 @@ SLICETIME_ORDER=before
 # files every later stage reads: with smoothing on, the GridCAT prep picks
 # up su*_bold.nii, with it off, u*_bold.nii. That is a pipeline switch, not
 # just an SPM parameter.
-SMOOTH_FWHM=5
+SMOOTH_FWHM=0
 
 
 # -----------------------------------------------------------------------------
