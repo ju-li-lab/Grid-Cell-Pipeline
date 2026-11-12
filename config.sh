@@ -20,7 +20,7 @@ OUTPUT_ROOT=/sc-projects/sc-proj-cc02-brainspace/myspace/julius/SOLIS_GC/workDir
 # This script directory on the cluster. run_selection.tsv lives here.
 PIPELINE_DIR=/sc-projects/sc-proj-cc02-brainspace/myspace/julius/SOLIS_GC/Grid-Cell-Pipeline
 
-SPM_DIR=/sc-projects/sc-proj-cc02-brainspace/software/matlab/spm25
+SPM_DIR=/sc-projects/sc-proj-cc02-brainspace/software/matlab/spm26
 GRIDCAT_DIR=/sc-projects/sc-proj-cc02-brainspace/myspace/julius/sirius_wip/GridCAT
 
 # Ships with GridCAT. Empty = GRIDCAT_DIR/CircStat2012a
