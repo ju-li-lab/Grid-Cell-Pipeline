@@ -14,9 +14,9 @@
 #
 #  All tables carry `gridcat_run`, so a single run can be analysed alone and
 #  several runs can be compared against each other. Everything subject-level
-#  (group, age, sex, ...) lives in subject_info.csv and is joined on
-#  subject_id; session-level scores can later be joined the same way on
-#  subject_id + session.
+#  (group, age, sex, handedness, ...) lives in subject_info.csv and is joined
+#  on subject_id. Spatial-cognition scores come in through
+#  import_spatial_cognition.R and join on subject_id + session.
 # ============================================================================
 
 library(dplyr)
@@ -31,7 +31,15 @@ library(readr)
 # One or more GridCAT output directories. Names become the gridcat_run label;
 # unnamed entries are labelled by their folder name.
 GRIDCAT_DIRS <- c(
-  "/Users/juli/Desktop/SOLIS/GLM_output_6f_t5_am_keep1_avg_1"
+  "/Users/juli/Desktop/SIRIUS/results_sirius_oap/sirius_oap_crew/",
+  "/Users/juli/Desktop/SIRIUS/results_sirius_oap/sirius_oap_control/",
+  "/Users/juli/Desktop/SIRIUS/sirius_oap_ev45/sirius_oap_ev45_crew/",
+  "/Users/juli/Desktop/SIRIUS/sirius_oap_ev45/sirius_oap_ev45_control/",
+  "/Users/juli/Desktop/SIRIUS/results_GLM_output_5f_pmod_avg0_ev23_smooth0_thr00_oap/",
+  "/Users/juli/Desktop/SIRIUS/results_GLM_output_7f_pmod_avg0_ev23_smooth0_thr00_oap/",
+  "/Users/juli/Desktop/SOLIS/results_solis_oap/",
+  "/Users/juli/Desktop/SOLIS/results_GLM_output_6f_pmod_ev45_pmoap_thr00/",
+  "/Users/juli/Desktop/SOLIS/results_GLM_output_6f_pmod_ev23_pmoap_thr00_noamplitude/"
 )
 
 SUBJECT_INFO_CSV <- "subject_info.csv"
@@ -274,18 +282,29 @@ import_gridcat <- function(dirs, verbose = TRUE) {
 
 
 # ---- subject-level info -------------------------------------------------------
-#  Group and anything else subject-level lives in ONE editable CSV, joined on
-#  subject_id. Add columns (age, sex, exclude, ...) and they all come along.
+#  Group and anything else subject-level lives in ONE editable CSV, joined
+#  on subject_id. Subjects new to it are appended with empty fields; what you
+#  filled in and columns you added are left alone.
 
-make_subject_info_template <- function(runs, path) {
-  tpl <- runs %>%
-    distinct(subject_id, subject_num, subject_code, cohort) %>%
-    arrange(subject_num, subject_code, cohort) %>%
-    mutate(group = NA_character_)
-  write_csv(tpl, path, na = "")
-  message("Wrote subject-info template: ", normalizePath(path),
-          "\n  -> fill in `group` (and any other columns), then re-run.")
-  tpl
+SUBJECT_INFO_COLUMNS <- c("subject_id", "group", "age", "sex", "handedness")
+
+update_subject_info <- function(runs, path) {
+  info <- if (file.exists(path)) {
+    read_csv(path, col_types = cols(.default = "c"))
+  } else {
+    tibble(subject_id = character())
+  }
+  new_ids      <- setdiff(unique(runs$subject_id), info$subject_id)
+  missing_cols <- setdiff(SUBJECT_INFO_COLUMNS, names(info))
+  if (length(new_ids) == 0 && length(missing_cols) == 0) return(invisible(info))
+
+  info <- bind_rows(info, tibble(subject_id = sort(new_ids)))
+  for (col in missing_cols) info[[col]] <- NA_character_
+  info <- relocate(info, any_of(SUBJECT_INFO_COLUMNS))
+  write_csv(info, path, na = "")
+  message("Added ", length(new_ids), " subject(s) to ", normalizePath(path),
+          "\n  -> fill in group, age, sex, handedness where you have them.")
+  invisible(info)
 }
 
 attach_subject_info <- function(df, path) {
@@ -317,9 +336,7 @@ grid_runs      <- imported$runs
 grid_stability <- imported$stability
 voxel_ori      <- imported$voxel_ori
 
-if (!file.exists(SUBJECT_INFO_CSV)) {
-  make_subject_info_template(grid_runs, SUBJECT_INFO_CSV)
-}
+update_subject_info(grid_runs, SUBJECT_INFO_CSV)
 grid_runs      <- attach_subject_info(grid_runs,      SUBJECT_INFO_CSV)
 grid_stability <- attach_subject_info(grid_stability, SUBJECT_INFO_CSV)
 voxel_ori      <- attach_subject_info(voxel_ori,      SUBJECT_INFO_CSV)

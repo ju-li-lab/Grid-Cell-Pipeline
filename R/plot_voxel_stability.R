@@ -18,10 +18,10 @@ library(dplyr)
 library(tidyr)
 library(ggplot2)
 
-GRIDCAT_RUN <- NULL      # NULL = first imported run, or name one from run_info
-HEMI        <- "bilat"   # "bilat", "left" or "right"
+GRIDCAT_RUN <- c("results_GLM_output_5f_pmod_avg0_ev23_smooth0_thr00_oap")      # NULL = first imported run, or name one from run_info
+HEMI        <- "right"   # "bilat", "left" or "right"
 SESSIONS    <- NULL      # NULL = all, or e.g. c(1)
-PERIOD      <- 60        # 60 for 6-fold symmetry, 90 for 4-fold
+PERIOD      <- 72        # 60 for 6-fold symmetry, 90 for 4-fold
 
 stopifnot(exists("voxel_ori"))
 if (is.null(GRIDCAT_RUN)) GRIDCAT_RUN <- unique(voxel_ori$gridcat_run)[1]

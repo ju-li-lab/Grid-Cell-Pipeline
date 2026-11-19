@@ -13,7 +13,8 @@ function roi_tsnr_filter(derivRoot, varargin)
 % Writes filtered copies of the left/right masks (filenames unchanged),
 % rebuilds bilat as the union of the two filtered sides, and writes the tSNR
 % image it used. Default output: <RoiDir>_tsnr, which is what 03_gridcat.sh
-% reads when ROI_TSNR_FILTER=1 in config.sh.
+% reads when ROI_TSNR_FILTER=1 in config.sh. Each side's mask is found on its
+% own, because the two sides may carry different labels (lpmErC / rpmErC).
 %
 % tSNR here is mean(raw) / SD(residual after a DCT high-pass at the GLM's own
 % cutoff) - the noise the GLM actually sees. It is direction-blind, so
@@ -73,11 +74,11 @@ if ~o.DryRun && ~isfolder(outDir), mkdir(outDir); end
 csvPath = o.CSV;
 if isempty(csvPath), csvPath = fullfile(outDir, 'roi_tsnr.csv'); end
 
-% ---- discover subject x session from the ROI masks --------------------
+% ---- discover subject x session from the left masks -------------------
 m = dir(fullfile(roiDir, 'r*_hemi-left_label-*_mask.nii'));
 keys = {};
 for a = 1:numel(m)
-    tok = regexp(m(a).name, '^r(sub-[^_]+)_(ses-[^_]+)_hemi-left_label-([^_]+)_mask\.nii$', ...
+    tok = regexp(m(a).name, '^r(sub-[^_]+)_(ses-[^_]+)_hemi-left_label-[^_]+_mask\.nii$', ...
                  'tokens', 'once');
     if isempty(tok), continue; end
     if ~isempty(o.Subjects) && ~ismember(tok{1}, o.Subjects), continue; end
@@ -103,9 +104,10 @@ else
 end
 fprintf('============================================\n\n');
 
-rows = {};
+rows  = {};
+sides = {'left', 'right'};
 for k = 1:size(keys, 1)
-    sub = keys{k,1}; ses = keys{k,2}; label = keys{k,3};
+    sub = keys{k,1}; ses = keys{k,2};
 
     funcs = find_runs(derivRoot, sub, ses, o.Prefix, o.Tasks);
     if isempty(funcs)
@@ -113,30 +115,25 @@ for k = 1:size(keys, 1)
         continue;
     end
 
-    refPath = fullfile(roiDir, sprintf('r%s_%s_hemi-left_label-%s_mask.nii', sub, ses, label));
-    info    = niftiinfo(refPath);
+    masks = {side_mask(roiDir, sub, ses, 'left'), side_mask(roiDir, sub, ses, 'right')};
+    info  = niftiinfo(masks{1});
 
     [tsnr, funcInfo, brainTsnr] = tsnr_volume(funcs, o.HPFSec, o.TR, lower(o.Combine));
-    check_same_grid(info, funcInfo, refPath, funcs{1});
+    check_same_grid(info, funcInfo, masks{1}, funcs{1});
 
     % ---- pooled distribution over both hemispheres -> outlier fence ----
-    sides  = {'left', 'right'};
-    roiIdx = struct('left', [], 'right', []);
-    pooled = [];
+    roiIdx = cell(1, 2);
     for h = 1:2
-        mPath = fullfile(roiDir, sprintf('r%s_%s_hemi-%s_label-%s_mask.nii', ...
-                                         sub, ses, sides{h}, label));
-        if ~isfile(mPath), continue; end
-        M = niftiread(mPath);
+        M = niftiread(masks{h});
         if numel(M) ~= numel(tsnr)
             error(['ROI mask and the functionals are on different grids:\n' ...
                    '  %s (%d voxels)\n  functional (%d voxels)'], ...
-                   mPath, numel(M), numel(tsnr));
+                   masks{h}, numel(M), numel(tsnr));
         end
-        roiIdx.(sides{h}) = find(M(:) > 0.5);
-        tv = tsnr(roiIdx.(sides{h}));
-        pooled = [pooled; tv(isfinite(tv))];                       %#ok<AGROW>
+        roiIdx{h} = find(M(:) > 0.5);
     end
+    pooled = tsnr([roiIdx{1}; roiIdx{2}]);
+    pooled = pooled(isfinite(pooled));
     if isempty(pooled)
         fprintf('%-11s %-8s  no finite tSNR values in the ROI - skipped\n', sub, ses);
         continue;
@@ -146,24 +143,21 @@ for k = 1:size(keys, 1)
     q3  = quartile(pooled, 0.75);
     cut = q1 - 1.5 * (q3 - q1);
 
-    fprintf('%s %s  label-%s  %d runs  brain tSNR %.1f  Q1 %.1f  IQR %.1f  cut %.1f\n', ...
-            sub, ses, label, numel(funcs), brainTsnr, q1, q3 - q1, cut);
+    fprintf('%s %s  %d runs  brain tSNR %.1f  Q1 %.1f  IQR %.1f  cut %.1f\n', ...
+            sub, ses, numel(funcs), brainTsnr, q1, q3 - q1, cut);
 
-    kept = struct('left', [], 'right', []);
+    kept = cell(1, 2);
     for h = 1:2
-        side = sides{h};
-        idx  = roiIdx.(side);
-        if isempty(idx)
-            fprintf('   %-5s  no mask - skipped\n', side);
-            continue;
-        end
+        [~, stem] = fileparts(masks{h});
+        label = regexp(stem, '(?<=_label-)[^_]+', 'match', 'once');
+        idx = roiIdx{h};
         tv  = tsnr(idx);
         sel = isfinite(tv) & tv >= cut;
 
-        fprintf('   %-5s  %3d voxels, tSNR median %.1f -> dropping %d outlier(s)\n', ...
-                side, numel(idx), median(tv(isfinite(tv))), sum(~sel));
+        fprintf('   %-5s  %-10s %3d voxels, tSNR median %.1f -> dropping %d outlier(s)\n', ...
+                sides{h}, label, numel(idx), median(tv(isfinite(tv))), sum(~sel));
 
-        rows = [rows; {o.Trial, sub, ses, side, label, numel(funcs), ...
+        rows = [rows; {o.Trial, sub, ses, sides{h}, label, numel(funcs), ...
                        numel(idx), sum(sel), 100 * sum(sel) / numel(idx), cut, ...
                        median(tv(sel), 'omitnan'), ...
                        median(tv(isfinite(tv) & ~sel), 'omitnan'), ...
@@ -171,26 +165,24 @@ for k = 1:size(keys, 1)
 
         if sum(sel) < o.MinVoxels
             warning('roi_tsnr_filter:tooFew', ...
-                '%s %s hemi-%s would keep only %d voxels (MinVoxels %d). NOT WRITTEN.', ...
-                 sub, ses, side, sum(sel), o.MinVoxels);
+                '%s %s hemi-%s would keep only %d voxels (MinVoxels %d). NOT WRITTEN, nor bilat.', ...
+                 sub, ses, sides{h}, sum(sel), o.MinVoxels);
             continue;
         end
-        kept.(side) = idx(sel);
+        kept{h} = idx(sel);
 
         if ~o.DryRun
-            write_mask(info, size(tsnr), idx(sel), ...
-                fullfile(outDir, sprintf('r%s_%s_hemi-%s_label-%s_mask', ...
-                                         sub, ses, side, label)));
+            write_mask(info, size(tsnr), kept{h}, fullfile(outDir, stem));
         end
     end
 
     if ~o.DryRun
-        % bilat is rebuilt from the FILTERED sides, never copied
-        both = [kept.left; kept.right];
-        if numel(both) >= o.MinVoxels
-            write_mask(info, size(tsnr), both, ...
-                fullfile(outDir, sprintf('r%s_%s_hemi-bilat_label-%s_mask', ...
-                                         sub, ses, label)));
+        % bilat is rebuilt from the FILTERED sides, never copied, and only
+        % when both sides were written; named as prepare_gridcat_directory does
+        if ~isempty(kept{1}) && ~isempty(kept{2})
+            [~, stem] = fileparts(masks{1});
+            write_mask(info, size(tsnr), [kept{1}; kept{2}], ...
+                fullfile(outDir, strrep(stem, '_hemi-left_', '_hemi-bilat_')));
         end
         write_vol(info, tsnr, fullfile(outDir, sprintf('%s_%s_tsnr', sub, ses)));
     end
@@ -221,6 +213,16 @@ h = (n - 1) * p + 1;
 lo = floor(h);
 hi = ceil(h);
 q = x(lo) + (h - lo) * (x(hi) - x(lo));
+end
+
+function f = side_mask(roiDir, sub, ses, side)
+% This side's own mask, whatever its label - never the other side's label.
+d = dir(fullfile(roiDir, sprintf('r%s_%s_hemi-%s_label-*_mask.nii', sub, ses, side)));
+if numel(d) ~= 1
+    error('Expected one %s mask for %s %s in %s, found %d:%s', ...
+          side, sub, ses, roiDir, numel(d), sprintf('\n  %s', d.name));
+end
+f = fullfile(d.folder, d.name);
 end
 
 function funcs = find_runs(derivRoot, sub, ses, prefix, tasks)

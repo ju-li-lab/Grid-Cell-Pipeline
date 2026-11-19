@@ -7,8 +7,9 @@ computed within each subject — no threshold is carried between subjects.
 All sessions are filtered by default.
 
 Writes filtered copies of the left/right masks (filenames unchanged), rebuilds
-`hemi-bilat` as the union of the two **filtered** sides, and writes the tSNR
-image it used. Output defaults to `GLM_runauto/ROI_tsnr`, which `03_gridcat.sh`
+`hemi-bilat` as the union of the two **filtered** sides (only when both were
+written), and writes the tSNR image it used. Each side's mask is found on its
+own, so left and right may carry different labels (`lpmErC` / `rpmErC`). Output defaults to `GLM_runauto/ROI_tsnr`, which `03_gridcat.sh`
 reads when `ROI_TSNR_FILTER=1` in `config.sh`.
 
 ```bash

@@ -261,22 +261,41 @@ settings, not by their folder names.
 R/
   import_gridcat.R        import one or MORE GLM output dirs ->
                           run_info, grid_runs, grid_stability, voxel_ori
-  plot_gridcat_run.R      one run: contrast / Rayleigh z / NaN share per run
+  import_spatial_cognition.R
+                          spatial-cognition workbooks (.xlsx) -> spatial_cog;
+                          adds the study code to the subject IDs and maps
+                          the file's sessions to MRI sessions
+  predict_spatial_cognition.R
+                          one run: does a grid measure predict a test score,
+                          overall (subject means) and in its change between
+                          sessions? uncorrected, with a shuffled-subjects
+                          chance level
+  plot_spatial_cognition.R
+                          one study: every subject's test scores over all
+                          sessions, one plot per measure
+  plot_gridcat_run.R      one run: contrast / Rayleigh z / NaN share per run,
+                          and the contrast against 0 per session
   compare_gridcat_runs.R  several runs: which settings differ, paired metric
                           comparison, phi agreement between runs
   plot_voxel_stability.R  voxel grid orientation across runs as a spaghetti
                           plot per subject x session
-  subject_info.csv        subject-level info (group, age, ...), joined on
-                          subject_id; extend it with any columns you need
+  subject_info.csv        subject-level info (group, age, sex, handedness),
+                          joined on subject_id; new subjects are appended,
+                          extend it with any columns you need
   look_at_tsnr.R          tSNR tables from tools/tsnr_report.sh
   motion.R                within- and between-task motion QC
   paths.R                 what route each run travelled (event files)
 ```
 
 Set `GRIDCAT_DIRS` in `import_gridcat.R` to the output folder(s), source it,
-then source whichever plot script you need. Session-level scores (task
-performance etc.) can later be joined onto any table by `subject_id` +
-`session`.
+then source whichever plot script you need.
+
+For spatial cognition, edit the `import_spatial_cog()` calls at the bottom of
+`import_spatial_cognition.R` (files, study code, which file session is which
+MRI session) and source it after `import_gridcat.R`. Then
+`plot_spatial_cognition.R` draws the scores and `predict_spatial_cognition.R`
+tests them against one GridCAT run; set `GRIDCAT_RUN` there as in the plot
+scripts. Tables and PDFs go to `R/results/`.
 
 ---
 
@@ -311,6 +330,7 @@ tools/                  run by hand, not part of the chain
   grid_maps/            voxel-wise maps from GridCAT output
   scan_multirun.sh      write run_selection.tsv
   check_roi_coverage.sh how much of each ROI survives SPM's implicit mask
+  compare_roi_sessions.m  ses-02 ROI masks on the ses-01 EPI grid: overlap and shift
   ...
 R/                      importing and plotting the results
 ```

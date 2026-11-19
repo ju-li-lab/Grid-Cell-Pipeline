@@ -28,6 +28,7 @@ slprj/
 .Rproj.user/
 
 /R/*csv
+/R/results/
 /R/R.Rproj
 
 # Claude and other
